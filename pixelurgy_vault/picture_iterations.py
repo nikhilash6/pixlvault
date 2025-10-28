@@ -1,5 +1,6 @@
 import json
 import numpy as np
+import sqlite3
 import threading
 import time
 
@@ -10,8 +11,17 @@ from pixelurgy_vault.logging import get_logger
 from pixelurgy_vault.picture_iteration import PictureIteration
 from pixelurgy_vault.picture_quality import PictureQuality
 
+logger = get_logger(__name__)
+
 
 class PictureIterations:
+    def __contains__(self, iteration_id):
+        cursor = self._connection.cursor()
+        cursor.execute(
+            "SELECT 1 FROM picture_iterations WHERE id = ? LIMIT 1", (iteration_id,)
+        )
+        return cursor.fetchone() is not None
+
     def __init__(self, connection, db_path):
         self._connection = connection
         self._db_path = db_path
@@ -26,17 +36,15 @@ class PictureIterations:
         self._quality_worker.start()
 
     def stop_quality_worker(self):
+        logger.debug("Stopping quality worker...")
         if hasattr(self, "_quality_worker_stop"):
             self._quality_worker_stop.set()
         if hasattr(self, "_quality_worker"):
             self._quality_worker.join(timeout=5)  # Wait for thread to exit
+            if self._quality_worker.is_alive():
+                logger.warning("Quality worker thread did not exit within timeout.")
 
     def _quality_worker_loop(self, interval):
-        import sqlite3
-
-        logger = get_logger(__name__)
-        import time
-
         retries = 5
         delay = 0.2
         for attempt in range(retries):
@@ -84,14 +92,12 @@ class PictureIterations:
             with Image.open(file_path) as img:
                 return np.array(img.convert("RGB"))
         except Exception as e:
-            logger = get_logger(__name__)
-            logger.error(f"Failed to load image {file_path}: {e}")
+            logger.error(f"Failed to load image at {file_path} for quality worker: {e}")
             return None
 
     def _calculate_and_store_quality(
         self, thread_conn, it_id, image_np, quality_val=None, face_quality_val=None
     ):
-        logger = get_logger(__name__)
         try:
             quality_json = None
             # Only calculate and update quality if it is NULL
@@ -226,7 +232,6 @@ class PictureIterations:
         cursor = self._connection.cursor()
         vals = []
         for it in iterations:
-            logger = get_logger(__name__)
             logger.debug(
                 f"Importing picture {it.id}: file path {getattr(it, 'file_path', None)}"
             )
@@ -330,16 +335,38 @@ class PictureIterations:
     def find(self, **kwargs):
         # Use named columns for safety
         cursor = self._connection.cursor()
+        # Coerce is_master to int if present (avoid bool/numpy types)
+        if "is_master" in kwargs:
+            try:
+                kwargs["is_master"] = int(kwargs["is_master"])
+            except Exception as e:
+                logger.error(
+                    f"[PICTURE_ITERATIONS.FIND] Could not coerce is_master to int: {kwargs['is_master']} ({type(kwargs['is_master'])}): {e}"
+                )
+                raise
         if not kwargs:
             cursor.execute("SELECT * FROM picture_iterations")
         else:
             query = "SELECT * FROM picture_iterations WHERE " + " AND ".join(
                 [f"{k}=?" for k in kwargs.keys()]
             )
-            cursor.execute(query, tuple(kwargs.values()))
+            params = tuple(kwargs.values())
+            # Debug: log query and params
+            logger.debug(f"[PICTURE_ITERATIONS.FIND] SQL: {query} | PARAMS: {params}")
+            # Check for parameter mismatch
+            if query.count("?") != len(params):
+                logger.error(
+                    f"[PICTURE_ITERATIONS.FIND] Parameter count mismatch: {query.count('?')} placeholders, {len(params)} params"
+                )
+            try:
+                cursor.execute(query, params)
+            except Exception as e:
+                logger.error(
+                    f"[PICTURE_ITERATIONS.FIND] Exception: {e} | SQL: {query} | PARAMS: {params}"
+                )
+                raise
         rows = cursor.fetchall()
         result = []
-        import logging
 
         for row in rows:
             quality = None
@@ -349,11 +376,11 @@ class PictureIterations:
                     if isinstance(qdata, dict):
                         quality = PictureQuality(**qdata)
                     else:
-                        logging.warning(
+                        logger.warning(
                             f"Quality field for iteration {row['id']} is not a dict: {qdata}"
                         )
                 except Exception as e:
-                    logging.warning(
+                    logger.warning(
                         f"Failed to parse quality for iteration {row['id']}: {e}; value: {row['quality']}"
                     )
             it = PictureIteration(
