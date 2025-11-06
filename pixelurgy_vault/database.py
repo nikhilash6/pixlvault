@@ -8,12 +8,30 @@ import sqlite3
 import threading
 from typing import Optional, List
 
-from .character import Character
 from .logging import get_logger
-from .picture import Picture
 from .vault_upgrade import VaultUpgrade
 
 logger = get_logger(__name__)
+
+
+def _assert_no_bytes(params):
+    if isinstance(params, dict):
+        for v in params.values():
+            assert not isinstance(v, bytes), (
+                f"Attempted to insert raw bytes into DB: {v!r}"
+            )
+    elif isinstance(params, (list, tuple)):
+        for item in params:
+            if isinstance(item, (list, tuple, dict)):
+                _assert_no_bytes(item)
+            else:
+                assert not isinstance(item, bytes), (
+                    f"Attempted to insert raw bytes into DB: {item!r}"
+                )
+    else:
+        assert not isinstance(params, bytes), (
+            f"Attempted to insert raw bytes into DB: {params!r}"
+        )
 
 
 class VaultDatabase:
@@ -31,18 +49,29 @@ class VaultDatabase:
         self._lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
 
-        self._ensure_connection()
-
         if not db_exists:
-            logger.debug("Creating tables and importing default data...")
+            logger.info("Creating tables and importing default data...")
             # Create tables from dataclasses
             self._ensure_connection()
+            # Always create metadata table first
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+                """
+            )
             for model in [CharacterModel, PictureModel, PictureTagModel]:
                 sql = self.create_table_sql(model)
+                logger.info(
+                    f"CREATE TABLE SQL for {getattr(model, '__tablename__', model.__name__)}: {sql}"
+                )
                 self._conn.execute(sql)
             self._conn.commit()
         else:
             logger.debug("Using existing database, skipping default import.")
+            self._ensure_connection()
             upgrader = VaultUpgrade(self._conn)
             upgrader.upgrade_if_necessary()
 
@@ -78,6 +107,8 @@ class VaultDatabase:
             sql_type = cls.python_type_to_sql(f.type)
             col_def = f"{f.name} {sql_type}"
             meta = f.metadata if hasattr(f, "metadata") else {}
+            if meta.get("db_ignore", False):
+                continue
             if meta.get("primary_key"):
                 primary_keys.append(f.name)
             if meta.get("composite_key"):
@@ -148,7 +179,7 @@ class VaultDatabase:
         return _conn_ctx()
 
     def set_metadata(self, key: str, value: str):
-        self._execute(
+        self.execute(
             """
             INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)
             """,
@@ -157,7 +188,7 @@ class VaultDatabase:
         )
 
     def get_metadata(self, key: str) -> Optional[str]:
-        row = self._execute(
+        row = self.execute(
             "SELECT value FROM metadata WHERE key = ?", (key,)
         ).fetchone()
         return row["value"] if row else None
@@ -170,53 +201,36 @@ class VaultDatabase:
             self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
 
-    def _execute(
+    def execute(
         self, sql: str, params: tuple = (), commit: bool = False
     ) -> sqlite3.Cursor:
         with self._lock:
             self._ensure_connection()
+            _assert_no_bytes(params)
             curs = self._conn.execute(sql, params)
             if commit:
                 self._conn.commit()
             return curs
 
-    def _executemany(
+    def executemany(
         self, sql: str, seq_of_params: list, commit: bool = False
     ) -> sqlite3.Cursor:
         with self._lock:
             self._ensure_connection()
+            for params in seq_of_params:
+                _assert_no_bytes(params)
             curs = self._conn.executemany(sql, seq_of_params)
             if commit:
                 self._conn.commit()
             return curs
 
-    def _query(self, sql: str, params: tuple = ()) -> List[sqlite3.Row]:
+    def query(self, sql: str, params: tuple = ()) -> List[sqlite3.Row]:
         with self._lock:
             self._ensure_connection()
             curs = self._conn.execute(sql, params)
             return curs.fetchall()
 
-    def import_default_data(self):
-        """
-        Import default data into the vault.
-        Extend this method to add default pictures or metadata as needed.
-        """
-        # Add Logo.png to every vault
-
-        logo_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Logo.png")
-        logo_dest_folder = self.image_root
-        logger.debug(f"logo_dest_folder in _import_default_data: {logo_dest_folder}")
-
-        character = Character(
-            name="EsmeraldaVault", description="Built-in vault character"
-        )
-        self.characters.add(character)
-
-        picture = Picture.create_from_file(
-            image_root_path=logo_dest_folder,
-            source_file_path=logo_src,
-            character_id=character.id,
-            description="Vault Logo",
-        )
-        assert picture.file_path
-        self.insert_pictures([picture])
+    def commit(self):
+        with self._lock:
+            if self._conn:
+                self._conn.commit()
