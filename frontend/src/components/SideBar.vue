@@ -13,6 +13,7 @@ const props = defineProps({
   selectedSet: { type: [Number, null], default: null },
   searchQuery: { type: String, default: "" },
   selectedSort: { type: String, default: "" },
+  selectedDescending: { type: Boolean, default: false },
   backendUrl: { type: String, required: true },
 });
 
@@ -26,7 +27,9 @@ const emit = defineEmits([
   "set-error",
   "set-loading",
   "images-assigned-to-character",
+  "images-moved",
   "search-images",
+  "update:similarity-character",
 ]);
 
 const dragOverSet = ref(null);
@@ -40,6 +43,7 @@ const categoryCounts = ref({
   [props.allPicturesId]: 0,
   [props.unassignedPicturesId]: 0,
 });
+
 const characterThumbnails = ref({});
 const expandedCharacters = ref({});
 
@@ -51,13 +55,14 @@ const sections = ref({
   people: true,
   sets: true,
   analysis: true,
-  search: true,
+  sort: true,
 });
 const dragOverCharacter = ref(null);
 const nextCharacterNumber = ref(1);
 
 // --- Picture Sets State ---
 const pictureSets = ref([]);
+const referencePictureSetsByCharacter = ref({});
 
 // --- Character Editor State ---
 const characterEditorOpen = ref(false);
@@ -100,25 +105,66 @@ const selectedCharacterObj = computed(() => {
   return null;
 });
 
-// Use reference_picture_set_id from categoryCounts (populated from backend /category/summary)
-const referenceSetInfoByCharacter = computed(() => {
-  const map = {};
-  sortedCharacters.value.forEach((char) => {
-    // Find the reference set for this character by matching name and description
-    const set = pictureSets.value.find(
-      (s) =>
-        s.name === "reference_pictures" && s.description === String(char.id)
+// --- Similarity Character Dropdown State ---
+const SIMILARITY_SORT_KEY = "CHARACTER_LIKENESS"; // Adjust if backend uses a different key
+const similarityCharacter = ref(null);
+
+const similarityCharacterOptions = computed(() => {
+  let options = sortedCharacters.value.map((c) => ({
+    text: c.name,
+    value: c.id,
+  }));
+  return options;
+});
+
+watch(similarityCharacter, (val) => {
+  emit("update:similarity-character", val);
+});
+
+const reactiveSelectedDescending = ref(props.selectedDescending);
+
+watch(
+  () => props.selectedDescending,
+  (newValue, oldValue) => {
+    console.log(
+      "[SideBar.vue] Prop selectedDescending changed from",
+      oldValue,
+      "to",
+      newValue
     );
-    if (set) {
-      map[char.id] = set;
-    }
-  });
-  return map;
+    reactiveSelectedDescending.value = newValue;
+  }
+);
+
+const descendingModel = computed({
+  get: () => {
+    console.log(
+      "[SideBar.vue] descendingModel.get() called. Current value:",
+      reactiveSelectedDescending.value
+    );
+    return reactiveSelectedDescending.value;
+  },
+  set: (value) => {
+    console.log(
+      "[SideBar.vue] descendingModel.set() called. New value:",
+      value
+    );
+    reactiveSelectedDescending.value = value;
+    emit("update:selected-sort", { sort: sortModel.value, descending: value });
+    console.log(
+      "[SideBar.vue] descendingModel.set() completed. Updated reactiveSelectedDescending:",
+      reactiveSelectedDescending.value
+    );
+  },
 });
 
 const sortModel = computed({
   get: () => props.selectedSort,
-  set: (value) => emit("update:selected-sort", value ?? ""),
+  set: (value) =>
+    emit("update:selected-sort", {
+      sort: value != null ? String(value) : "",
+      descending: descendingModel.value,
+    }),
 });
 
 const searchModel = computed({
@@ -177,6 +223,12 @@ async function deleteCharacter() {
       }
     );
     if (!res.ok) throw new Error("Failed to delete character");
+
+    // Remove the deleted character from the characters array
+    characters.value = characters.value.filter(
+      (char) => char.id !== props.selectedCharacter
+    );
+
     await fetchCharacters(); // Refresh sidebar
   } catch (e) {
     setError(e.message);
@@ -237,57 +289,46 @@ watch(
   { immediate: true }
 );
 
-() => sortedCharacters.value,
-  (chars) => {
-    // Initialize collapse state for all characters to true (collapsed by default)
-    chars.forEach((char) => {
-      if (!(char.id in collapsedCharacters.value)) {
-        collapsedCharacters.value[char.id] = true;
-      }
-    });
-  },
-  { immediate: true };
-
 function toggleCharacterCollapse(charId) {
   collapsedCharacters.value[charId] = !collapsedCharacters.value[charId];
 }
 
 // --- Sidebar & Character Data ---
-async function fetchSidebarCounts() {
+async function fetchSidebarData() {
   // Fetch total image count for END key logic
   try {
-    const resAll = await fetch(`${props.backendUrl}/category/summary`);
-    if (resAll.ok) {
-      const data = await resAll.json();
-      totalImages.value = data.image_count || 0;
-      categoryCounts.value[props.allPicturesId] = data.image_count;
-    }
-  } catch {}
-  try {
-    const resAll = await fetch(`${props.backendUrl}/category/summary`);
+    // All images summary
+    const resAll = await fetch(
+      `${props.backendUrl}/characters/${props.allPicturesId}/summary`
+    );
     if (resAll.ok) {
       const data = await resAll.json();
       categoryCounts.value[props.allPicturesId] = data.image_count;
+    } else {
+      console.warn("Failed to fetch all images summary");
     }
-  } catch {}
+  } catch (e) {
+    console.warn("Error fetching all images summary:", e);
+  }
   try {
+    // Unassigned images summary
     const resUnassigned = await fetch(
-      `${props.backendUrl}/category/summary?primary_character_id=null`
+      `${props.backendUrl}/characters/${props.unassignedPicturesId}/summary`
     );
     if (resUnassigned.ok) {
       const data = await resUnassigned.json();
       categoryCounts.value[props.unassignedPicturesId] = data.image_count;
+    } else {
+      console.warn("Failed to fetch unassigned images summary");
     }
-  } catch {}
+  } catch (e) {
+    console.warn("Error fetching unassigned images summary:", e);
+  }
   await Promise.all(
     characters.value.map(async (char) => {
       try {
         const res = await fetch(
-          `${
-            props.backendUrl
-          }/category/summary?primary_character_id=${encodeURIComponent(
-            char.id
-          )}`
+          `${props.backendUrl}/characters/${char.id}/summary`
         );
         if (res.ok) {
           const data = await res.json();
@@ -321,13 +362,13 @@ function refreshSidebar() {
   console.log("Refreshing sidebar");
   fetchCharacters();
   fetchPictureSets();
-  fetchSidebarCounts();
+  fetchSidebarData();
 }
 
 async function fetchCharacterThumbnail(characterId) {
   try {
     const cacheBuster = Date.now();
-    const thumbUrl = `${props.backendUrl}/face_thumbnail/${characterId}?cb=${cacheBuster}`;
+    const thumbUrl = `${props.backendUrl}/characters/${characterId}/thumbnail?cb=${cacheBuster}`;
     const res = await fetch(thumbUrl);
     if (res.ok && res.headers.get("content-type")?.includes("image/png")) {
       characterThumbnails.value[characterId] = thumbUrl;
@@ -350,24 +391,41 @@ async function fetchSortOptions() {
     const res = await fetch(`${props.backendUrl}/sort_mechanisms`);
     if (!res.ok) throw new Error("Failed to fetch sort mechanisms");
     const options = await res.json();
-    // Use backend-provided values directly
-    sortOptions.value = options.map((opt) => ({
-      label: opt.label,
-      value: opt.id,
+    console.log("Fetched sort options:", options);
+
+    // Filter out CHARACTER_LIKENESS if there are no characters
+    const filteredOptions = options.filter((opt) => {
+      if (opt.key === SIMILARITY_SORT_KEY) {
+        return sortedCharacters.value.length > 0; // Only include if characters exist
+      }
+      return true;
+    });
+
+    // Map options to the desired format
+    sortOptions.value = filteredOptions.map((opt) => ({
+      label: opt.description,
+      value: opt.key,
     }));
-    if (!sortModel.value && sortOptions.value.length) {
-      sortModel.value = sortOptions.value[0].value;
+
+    // Reset sortModel if it is not in the available options
+    if (!sortOptions.value.some((opt) => opt.value === sortModel.value)) {
+      sortModel.value = sortOptions.value.length
+        ? sortOptions.value[0].value
+        : null;
     }
   } catch (e) {
-    // Fallback to hardcoded options only if backend fails
-    sortOptions.value = [
-      { label: "Date: Latest First", value: "created_at DESC" },
-      { label: "Date: Oldest First", value: "created_at ASC" },
-      { label: "Score: Highest First", value: "score DESC" },
-      { label: "Score: Lowest First", value: "score ASC" },
-      { label: "Search Likeness", value: "search_likeness" },
-    ];
-    if (!selectedSort.value) selectedSort.value = sortOptions.value[0].value;
+    console.error("Error fetching sort options:", e);
+    sortOptions.value = [];
+  }
+}
+
+// Ensure sortedCharacters is fetched before fetchSortOptions
+async function fetchSortedCharactersAndSortOptions() {
+  try {
+    await fetchCharacters(); // Fetch characters first
+    await fetchSortOptions(); // Then fetch sort options
+  } catch (e) {
+    console.error("Error fetching sorted characters and sort options:", e);
   }
 }
 
@@ -378,6 +436,16 @@ async function fetchPictureSets() {
     if (!res.ok) throw new Error("Failed to fetch picture sets");
     const sets = await res.json();
     pictureSets.value = Array.isArray(sets) ? [...sets] : [];
+    console.log("Found picture sets:", pictureSets.value);
+    referencePictureSetsByCharacter.value = pictureSets.value.reduce(
+      (acc, set) => {
+        if (set.reference_character) {
+          acc[set.reference_character.id] = set;
+        }
+        return acc;
+      },
+      {}
+    );
   } catch (e) {
     console.error("Error fetching picture sets:", e);
     pictureSets.value = [...pictureSets.value]; // force reactivity on error
@@ -411,7 +479,7 @@ async function handleDeleteSet() {
     if (!res.ok) throw new Error("Failed to delete set");
     emit("select-set", null);
     await fetchPictureSets();
-    await fetchSidebarCounts();
+    await fetchSidebarData();
   } catch (e) {
     alert("Failed to delete set: " + (e.message || e));
   }
@@ -442,7 +510,7 @@ async function handleDropOnSet(setId, event) {
     // Add each image to the set
     const addPromises = draggedIds.map(async (picId) => {
       const res = await fetch(
-        `${props.backendUrl}/picture_sets/${setId}/pictures/${picId}`,
+        `${props.backendUrl}/picture_sets/${setId}/members/${picId}`,
         { method: "POST" }
       );
       // 400 error might mean it's already in the set, which is ok
@@ -455,6 +523,9 @@ async function handleDropOnSet(setId, event) {
 
     // Refresh the picture sets to update counts
     await fetchPictureSets();
+
+    // Emit event to parent to remove images from grid
+    emit("images-moved", { imageIds: draggedIds });
 
     console.log(
       `Added ${draggedIds.length} image(s) to set "${targetSet.name}"`
@@ -473,47 +544,113 @@ function handleDragLeaveCharacter() {
 }
 
 async function onCharacterDrop(characterId, event) {
-  // Get the dragged image IDs from the drag event
-  let draggedIds = [];
+  // Accept faceIds or imageIds from drag event
+  let faceIds = [];
+  let imageIds = [];
+  let dragType = null;
   try {
-    const data = JSON.parse(event.dataTransfer.getData("application/json"));
+    const rawDataStr = event.dataTransfer.getData("application/json");
+    console.log("[DROP] raw drag data string:", rawDataStr);
+    const data = JSON.parse(rawDataStr);
+    console.log("onCharacterDrop data:", data);
+    dragType = data.type || null;
+    if (
+      dragType === "face-bbox" &&
+      data.faceIds &&
+      Array.isArray(data.faceIds)
+    ) {
+      faceIds = data.faceIds;
+    }
     if (data.imageIds && Array.isArray(data.imageIds)) {
-      draggedIds = data.imageIds;
+      imageIds = data.imageIds;
     }
   } catch (e) {
     console.error("Could not parse drag data:", e);
     return;
   }
 
-  if (draggedIds.length === 0) {
+  if (dragType === "face-bbox" && faceIds.length > 0) {
+    // Assign faces to character
+    try {
+      const body = { face_ids: faceIds };
+      console.log("Assigning faces to character:", characterId, body);
+      const res = await fetch(
+        `${props.backendUrl}/characters/${characterId}/faces`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+      if (!res.ok) {
+        throw new Error("Failed to assign faces to character");
+      }
+      await fetchSidebarData();
+      await fetchCharacterThumbnail(characterId);
+      //emit("faces-assigned-to-character", { characterId, faceIds});
+      console.log(
+        `Assigned ${faceIds.length} face(s) to character ${characterId}`
+      );
+    } catch (e) {
+      alert("Failed to assign faces to character: " + (e.message || e));
+    }
+    return;
+  }
+
+  if (imageIds.length === 0) {
     console.log("No images found in drag data");
     return;
   }
 
   try {
-    // PATCH each image to assign primary_character_id
-    const patchPromises = draggedIds.map(async (picId) => {
-      const res = await fetch(`${props.backendUrl}/pictures/${picId}`, {
-        method: "PATCH",
+    // Fallback: assign images to character
+    const body = { picture_ids: imageIds };
+    console.log("Assigning images to character:", characterId, body);
+    const res = await fetch(
+      `${props.backendUrl}/characters/${characterId}/faces`,
+      {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ primary_character_id: characterId }),
-      });
-      if (!res.ok) {
-        throw new Error(`Failed to assign image ${picId} to character`);
+        body: JSON.stringify(body),
       }
-    });
-    await Promise.all(patchPromises);
-    // Optionally refresh sidebar counts
-    await fetchSidebarCounts();
-    // Refresh the character's thumbnail
-    await fetchCharacterThumbnail(characterId);
-    // Emit signal to App.vue to trigger ImageGrid refresh
-    emit("images-assigned-to-character", { characterId, imageIds: draggedIds });
-    console.log(
-      `Assigned ${draggedIds.length} image(s) to character ${characterId}`
     );
+    if (!res.ok) {
+      throw new Error("Failed to assign images to character");
+    }
+    await fetchSidebarData();
+    await fetchCharacterThumbnail(characterId);
+    //emit("faces-assigned-to-character", { characterId, imageIds });
+    console.log(
+      `Assigned ${imageIds.length} image(s) to character ${characterId}`
+    );
+    emit("images-assigned-to-character", { characterId, imageIds });
   } catch (e) {
     alert("Failed to assign images to character: " + (e.message || e));
+  }
+}
+
+// Batched face removal
+async function removeFacesFromCharacter(characterId, faceIds) {
+  try {
+    const res = await fetch(
+      `${props.backendUrl}/characters/${characterId}/faces`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ face_ids: faceIds }),
+      }
+    );
+    if (!res.ok) {
+      throw new Error("Failed to remove faces from character");
+    }
+    await fetchSidebarData();
+    await fetchCharacterThumbnail(characterId);
+    emit("faces-removed-from-character", { characterId, faceIds });
+    console.log(
+      `Removed ${faceIds.length} face(s) from character ${characterId}`
+    );
+  } catch (e) {
+    alert("Failed to remove faces from character: " + (e.message || e));
   }
 }
 
@@ -551,7 +688,8 @@ async function characterSaved() {
     // New character was created, increment nextCharacterNumber
     nextCharacterNumber.value++;
   }
-  fetchCharacters();
+  await fetchCharacters(); // Refresh characters
+  await fetchPictureSets(); // Refresh picture sets to include reference sets
   closeCharacterEditor();
 }
 
@@ -568,15 +706,38 @@ async function pictureSetSaved(setData) {
   }
   await fetchPictureSets();
   pictureSets.value = [...pictureSets.value]; // force reactivity
-  await fetchSidebarCounts();
+  await fetchSidebarData();
   closeSetEditor();
 }
 
 onMounted(() => {
-  fetchSortOptions();
-  fetchCharacters();
+  fetchSortedCharactersAndSortOptions(); // Ensure proper order of fetching
   fetchPictureSets();
+  console.log(
+    "[SideBar.vue] Initial descendingModel value:",
+    descendingModel.value
+  );
 });
+
+// Ensure similarityCharacter is valid when switching to CHARACTER_LIKENESS
+watch(
+  () => sortModel.value,
+  (newSort) => {
+    if (newSort === SIMILARITY_SORT_KEY) {
+      // Check if the current similarityCharacter is valid
+      if (
+        !sortedCharacters.value.some(
+          (char) => char.id === similarityCharacter.value
+        )
+      ) {
+        similarityCharacter.value =
+          sortedCharacters.value.length > 0
+            ? sortedCharacters.value[0].id
+            : null; // Default to the first character or null
+      }
+    }
+  }
+);
 
 defineExpose({ refreshSidebar });
 </script>
@@ -760,7 +921,7 @@ defineExpose({ refreshSidebar });
               class="sidebar-character-details"
             >
               <div class="sidebar-reference-pictures">
-                <template v-if="referenceSetInfoByCharacter[char.id]">
+                <template v-if="referencePictureSetsByCharacter[char.id]">
                   <div
                     :class="[
                       'sidebar-list-item',
@@ -768,20 +929,24 @@ defineExpose({ refreshSidebar });
                       {
                         active:
                           selectedSet ===
-                          referenceSetInfoByCharacter[char.id].id,
+                          referencePictureSetsByCharacter[char.id].id,
                         droppable:
                           dragOverSet ===
-                          referenceSetInfoByCharacter[char.id].id,
+                          referencePictureSetsByCharacter[char.id].id,
                       },
                     ]"
-                    @click="selectSet(referenceSetInfoByCharacter[char.id].id)"
+                    @click="
+                      selectSet(referencePictureSetsByCharacter[char.id].id)
+                    "
                     @dragover.prevent="
-                      dragOverSetItem(referenceSetInfoByCharacter[char.id].id)
+                      dragOverSetItem(
+                        referencePictureSetsByCharacter[char.id].id
+                      )
                     "
                     @dragleave="dragLeaveSetItem"
                     @drop.prevent="
                       handleDropOnSet(
-                        referenceSetInfoByCharacter[char.id].id,
+                        referencePictureSetsByCharacter[char.id].id,
                         $event
                       )
                     "
@@ -837,7 +1002,7 @@ defineExpose({ refreshSidebar });
         </div>
         <template
           v-for="(pset, idx) in pictureSets.filter(
-            (pset) => pset.name !== 'reference_pictures'
+            (pset) => pset.reference_character == null
           )"
           :key="pset.id"
         >
@@ -882,52 +1047,64 @@ defineExpose({ refreshSidebar });
       </div>
     </transition>
 
-    <div class="sidebar-section-header" @click="toggleSection('search')">
+    <div class="sidebar-section-header" @click="toggleSection('sort')">
       <v-icon small style="margin-right: 8px">
-        {{ sections.search ? "mdi-chevron-down" : "mdi-chevron-right" }}
+        {{ sections.sort ? "mdi-chevron-down" : "mdi-chevron-right" }}
       </v-icon>
-      Search &amp; Sorting
+      Sorting
       <span style="flex: 1 1 auto"></span>
     </div>
 
     <transition name="fade">
-      <div class="search-and-sort" v-show="sections.search">
+      <div class="search-and-sort" v-show="sections.sort">
         <div class="sidebar-searchbar-wrapper">
-          <SearchBar
-            v-model="searchModel"
-            placeholder="Search images..."
-            class="sidebar-searchbar"
-            @search="searchImages"
-          />
         </div>
-        <div class="sidebar-searchbar-wrapper">
+        <div
+          class="sidebar-searchbar-wrapper"
+          style="
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            align-items: stretch;
+          "
+        >
+          <div style="display: flex; align-items: center; gap: 8px">
+            <v-select
+              v-model="sortModel"
+              :items="sortOptions"
+              class="sidebar-sort-select"
+              item-title="label"
+              item-value="value"
+              label="Sort by"
+              dense
+              hide-details
+              style="flex: 1; min-width: 0"
+            />
+            <v-btn
+              icon
+              :title="descendingModel ? 'Make ascending' : 'Make descending'"
+              @click="descendingModel = !descendingModel"
+              style="margin-left: auto"
+            >
+              <v-icon>
+                {{
+                  descendingModel ? "mdi-sort-descending" : "mdi-sort-ascending"
+                }}
+              </v-icon>
+            </v-btn>
+          </div>
           <v-select
-            v-model="sortModel"
-            :items="sortOptions"
+            v-if="sortModel === SIMILARITY_SORT_KEY"
+            v-model="similarityCharacter"
+            :items="similarityCharacterOptions"
             class="sidebar-sort-select"
-            item-title="label"
-            item-value="value"
-            label="Sort by"
+            label="Similarity to"
             dense
             hide-details
+            style="min-width: 0; margin-top: -4px"
+            item-title="text"
+            item-value="value"
           />
-        </div>
-      </div>
-    </transition>
-    <div class="sidebar-section-header" @click="toggleSection('analysis')">
-      <v-icon small style="margin-right: 8px">
-        {{ sections.analysis ? "mdi-chevron-down" : "mdi-chevron-right" }}
-      </v-icon>
-      Analysis
-      <span style="flex: 1 1 auto"></span>
-    </div>
-    <transition name="fade">
-      <div v-show="sections.analysis">
-        <div class="sidebar-list-item" @click="$emit('switch-to-likeness')">
-          <span class="sidebar-list-icon">
-            <v-icon size="44">mdi-account-group</v-icon>
-          </span>
-          <span class="sidebar-list-label">Likeness View</span>
         </div>
       </div>
     </transition>
@@ -949,7 +1126,7 @@ defineExpose({ refreshSidebar });
 
 .sidebar-section-header {
   position: relative;
-  font-size: 1.2rem;
+  font-size: 1.0rem;
   font-weight: 800;
   padding: 2px;
   margin: 2px 0 2px 0;
@@ -978,12 +1155,12 @@ defineExpose({ refreshSidebar });
 .sidebar-list-item.active {
   display: flex;
   align-items: center;
-  min-height: 56px;
+  min-height: 48px;
   padding: 2px 6px;
   cursor: pointer;
   border-radius: 0;
   margin-bottom: 0;
-  font-size: 1em;
+  font-size: 0.9em;
   font-weight: 500;
   background: transparent;
   color: #fff;
@@ -1046,8 +1223,8 @@ defineExpose({ refreshSidebar });
   align-items: center;
   margin-right: 12px;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: 36px;
+  height: 36px;
 }
 
 .sidebar-list-label {
@@ -1060,8 +1237,8 @@ defineExpose({ refreshSidebar });
 }
 
 .sidebar-character-thumb {
-  max-width: 44px;
-  max-height: 44px;
+  max-width: 36px;
+  max-height: 36px;
   object-fit: contain;
   border-radius: 6px;
   box-shadow: 0 0 0 #bbb;
@@ -1083,7 +1260,7 @@ defineExpose({ refreshSidebar });
 }
 
 .sidebar-list-count {
-  font-size: 0.92em;
+  font-size: 0.8em;
   color: #b0b8c9;
   min-width: 2.5em;
   text-align: right;
@@ -1140,23 +1317,6 @@ defineExpose({ refreshSidebar });
 
 .sidebar-sort-select {
   background: rgba(200, 200, 200, 0.6);
-}
-
-.sidebar-searchbar-wrapper {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  position: relative;
-  width: 100%;
-  padding: 4px;
-}
-
-.sidebar-searchbar {
-  width: 100%;
-  min-width: 0;
-  position: relative;
-  transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-    width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .character-edit-btn {

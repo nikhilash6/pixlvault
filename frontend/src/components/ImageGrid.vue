@@ -11,8 +11,8 @@
     ref="imageImporterRef"
     :backendUrl="props.backendUrl"
     :selectedCharacterId="props.selectedCharacter"
-    :allPicturesId="'__all__'"
-    :unassignedPicturesId="'__unassigned__'"
+    :allPicturesId="props.allPicturesId"
+    :unassignedPicturesId="props.unassignedPicturesId"
     @import-finished="handleImagesUploaded"
   />
   <div style="position: relative">
@@ -62,14 +62,14 @@
           <div class="drag-overlay-message">{{ dragOverlayMessage }}</div>
         </div>
         <div
-          v-for="img in gridImagesToRender"
+          v-for="(img, idx) in gridImagesToRender"
           :key="img.id ? `img-${img.id}` : `placeholder-${img.idx}`"
           class="image-card"
           :draggable="isImageSelected(img.id)"
           @dragstart="onImageDragStart(img, img.idx, $event)"
           @click="handleImageCardClick(img, img.idx, $event)"
-          @mouseenter="img._showRes = true"
-          @mouseleave="img._showRes = false"
+          @mouseenter="handleImageMouseEnter(img)"
+          @mouseleave="handleImageMouseLeave(img)"
         >
           <v-card
             class="thumbnail-card"
@@ -134,6 +134,12 @@
                   class="thumbnail-img"
                   :src="`${props.backendUrl}/pictures/${img.id}`"
                   :ref="(el) => setVideoRef(img.id, el)"
+                  @load="
+                    () => {
+                      setThumbnailRef(img.id, el);
+                      onThumbnailLoad(img.id);
+                    }
+                  "
                   muted
                   loop
                   playsinline
@@ -163,7 +169,56 @@
                 </div>
               </template>
               <template v-else-if="img.thumbnail">
-                <img :src="img.thumbnail" class="thumbnail-img" />
+                <img
+                  :src="img.thumbnail"
+                  class="thumbnail-img"
+                  :ref="(el) => setThumbnailRef(img.id, el)"
+                  @load="
+                    () => {
+                      setThumbnailRef(img.id, el);
+                      onThumbnailLoad(img.id);
+                    }
+                  "
+                />
+                <!-- Face bounding box overlays: must be rendered after the image for correct stacking -->
+                <template
+                  v-if="thumbnailRefs[img.id] && thumbnailLoadedMap[img.id]"
+                >
+                  <div
+                    v-for="overlay in getFaceBboxOverlays(img).value"
+                    :key="overlay.idx + '-' + thumbnailLoadedMap[img.id]"
+                    class="face-bbox-overlay"
+                    :style="overlay.style"
+                    draggable="true"
+                    @dragstart="
+                      (e) => {
+                        e.stopPropagation();
+                        onFaceBboxDragStart(e, img, overlay.idx);
+                      }
+                    "
+                  >
+                    <span
+                      style="
+                        position: absolute;
+                        left: 0;
+                        top: 0;
+                        background: #222c;
+                        color: #fff;
+                        font-size: 0.8em;
+                        padding: 1px 4px;
+                        border-bottom-right-radius: 6px;
+                      "
+                    >
+                      {{
+                        img.faces &&
+                        img.faces[overlay.idx] &&
+                        img.faces[overlay.idx].character_name
+                          ? img.faces[overlay.idx].character_name
+                          : `Face ${overlay.idx + 1}`
+                      }}
+                    </span>
+                  </div>
+                </template>
                 <div
                   class="thumbnail-index-overlay"
                   :style="{
@@ -216,29 +271,29 @@
             </div>
           </v-card>
           <div v-if="isImageSelected(img.id)" class="selection-overlay"></div>
-                        <!-- Info row absolutely positioned below thumbnail -->
-              <div
-                class="thumbnail-info-row"
-              >
-                <div
-                  v-if="
-                    props.selectedSort === 'search_likeness' &&
-                    img.likeness_score !== undefined
-                  "
-                  class="likeness-score"
-                >
-                  Likeness: {{ img.likeness_score.toFixed(2) }}
-                </div>
-                <div
-                  v-else-if="
-                    props.selectedSort.includes('created_at') && img.created_at
-                  "
-                  class="thumbnail-info"
-                >
-                  {{ formatIsoDate(img.created_at) }}
-                </div>
-              </div>
-
+          <!-- Info row absolutely positioned below thumbnail -->
+          <div class="thumbnail-info-row">
+            <div
+              v-if="
+                typeof props.selectedSort === 'string' &&
+                props.selectedSort.includes('CHARACTER_LIKENESS') &&
+                img.character_likeness !== undefined
+              "
+              class="likeness-score"
+            >
+              Likeness: {{ img.character_likeness.toFixed(2) }}
+            </div>
+            <div
+              v-else-if="
+                typeof props.selectedSort === 'string' &&
+                props.selectedSort.includes('DATE') &&
+                img.created_at
+              "
+              class="thumbnail-info"
+            >
+              {{ formatIsoDate(img.created_at) }}
+            </div>
+          </div>
         </div>
         <!-- Bottom spacer -->
         <div
@@ -251,33 +306,260 @@
         ></div>
       </div>
     </div>
+
+    <!-- Search Result Bar -->
+    <div
+      v-if="props.searchQuery && props.searchQuery.length > 0"
+      class="search-result-bar"
+      style="position: absolute; bottom: 64px; left: 0; width: 100%; z-index: 1000; background-color: #f5f5f5; display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.1);"
+    >
+      <span>
+        Search result found {{
+          allGridImages && allGridImages.value
+            ? (console.log("allGridImages:", allGridImages.value),
+              console.log("gridImagesToRender:", gridImagesToRender.value),
+              gridImagesToRender.value.length)
+            : 0
+        }} items
+      </span>
+      <v-btn color="primary" @click="clearSearchQuery">Clear</v-btn>
+    </div>
   </div>
 </template>
 
 <script setup>
-// Number of images before/after viewport to load thumbnails for
-// Format date to ISO (YYYY-MM-DD HH:mm:ss)
-function formatIsoDate(dateStr) {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return dateStr;
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-import { computed, onMounted, ref, watch, nextTick, onUnmounted } from "vue";
+import {
+  computed,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+  nextTick,
+  onUnmounted,
+} from "vue";
 import {
   isSupportedMediaFile,
   isSupportedImageFile,
   dataTransferHasSupportedMedia,
   isSupportedVideoFile,
   getOverlayFormat,
+  PIL_IMAGE_EXTENSIONS,
+  VIDEO_EXTENSIONS,
 } from "../utils/media.js";
 import ImageImporter from "./ImageImporter.vue";
 import ImageOverlay from "./ImageOverlay.vue";
 import SelectionBar from "./SelectionBar.vue";
-import { useOverlayActions } from "../utils/useOverlayActions";
+import { useSearchOverlay } from "../utils/useSearchOverlay";
 
-const emit = defineEmits(["open-overlay", "refresh-sidebar"]);
+const emit = defineEmits(["open-overlay", "refresh-sidebar", "clear-search"]);
+
+// Props
+const props = defineProps({
+  thumbnailSize: Number,
+  sidebarVisible: Boolean,
+  backendUrl: String,
+  selectedCharacter: { type: [String, Number, null], default: null },
+  selectedSet: { type: [Number, String, null], default: null },
+  searchQuery: String,
+  selectedSort: String,
+  selectedDescending: Boolean,
+  similarityCharacter: { type: [String, Number, null], default: null },
+  showStars: Boolean,
+  showFaceBboxes: Boolean,
+  allPicturesId: String,
+  unassignedPicturesId: String,
+  gridVersion: { type: Number, default: 0 },
+  mediaTypeFilter: { type: String, default: "all" },
+});
+// Store refs for each thumbnail image
+const thumbnailRefs = reactive({});
+const thumbnailLoadedMap = reactive({});
+
+// Key to force face bbox overlay recompute
+const faceOverlayRedrawKey = ref(0);
+
+function triggerFaceOverlayRedraw() {
+  faceOverlayRedrawKey.value++;
+}
+
+onMounted(() => {
+  window.addEventListener("resize", triggerFaceOverlayRedraw);
+  console.log(
+    "[ImageGrid.vue] Mounted with selectedDescending:",
+    props.selectedDescending
+  );
+  console.log("[ImageGrid.vue] Clear Search button should be visible.");
+});
+onUnmounted(() => {
+  window.removeEventListener("resize", triggerFaceOverlayRedraw);
+});
+
+function onThumbnailLoad(id) {
+  thumbnailLoadedMap[id] = (thumbnailLoadedMap[id] || 0) + 1;
+}
+
+function setThumbnailRef(id, el) {
+  if (el) {
+    thumbnailRefs[id] = el;
+  } else {
+    delete thumbnailRefs[id];
+    delete thumbnailLoadedMap[id];
+  }
+}
+
+// --- Multi-face selection state ---
+const selectedFaceIds = ref([]); // Array of { imageId, faceIdx, faceId }
+
+function isFaceSelected(imageId, faceIdx) {
+  return selectedFaceIds.value.some(
+    (f) => f.imageId === imageId && f.faceIdx === faceIdx
+  );
+}
+
+function toggleFaceSelection(imageId, faceIdx, faceId) {
+  const idx = selectedFaceIds.value.findIndex(
+    (f) => f.imageId === imageId && f.faceIdx === faceIdx
+  );
+  if (idx !== -1) {
+    selectedFaceIds.value.splice(idx, 1);
+  } else {
+    selectedFaceIds.value.push({ imageId, faceIdx, faceId });
+  }
+}
+
+function clearFaceSelection() {
+  selectedFaceIds.value = [];
+}
+
+function onFaceBboxDragStart(event, img, faceIdx) {
+  // If this face is selected, drag all selected faces; else, drag just this one
+  console.log(`Dragging face bbox: imageId=${img.id}, faceIdx=${faceIdx}`);
+  let facesToDrag = [];
+  if (isFaceSelected(img.id, faceIdx) && selectedFaceIds.value.length > 0) {
+    facesToDrag = selectedFaceIds.value.map((f) => ({
+      imageId: f.imageId,
+      faceIdx: f.faceIdx,
+      faceId: f.faceId,
+    }));
+  } else {
+    const face = img.faces[faceIdx];
+    facesToDrag = [{ imageId: img.id, faceIdx, faceId: face.id }];
+  }
+  const dragDataStr = JSON.stringify({
+    type: "face-bbox",
+    faceIds: facesToDrag.map((f) => f.faceId),
+    imageIds: Array.from(new Set(facesToDrag.map((f) => f.imageId))),
+    faces: facesToDrag,
+  });
+  console.log("[DRAG] onFaceBboxDragStart dragData:", dragDataStr);
+  event.dataTransfer.setData("application/json", dragDataStr);
+  event.dataTransfer.effectAllowed = "move";
+}
+
+// Helper to calculate face bbox overlay style using object-fit: cover logic
+function getFaceBboxStyle(bbox, idx, img, el) {
+  if (!el) return { display: "none" };
+  const container = el.parentElement;
+  if (!container) return { display: "none" };
+  const containerWidth = container.clientWidth;
+  const containerHeight = container.clientHeight;
+  const naturalWidth = img.width || 1;
+  const naturalHeight = img.height || 1;
+  // Calculate scale and offset for object-fit: cover
+  const scale = Math.max(
+    containerWidth / naturalWidth,
+    containerHeight / naturalHeight
+  );
+  const displayWidth = naturalWidth * scale;
+  const displayHeight = naturalHeight * scale;
+  const offsetX = (containerWidth - displayWidth) / 2;
+  const offsetY = (containerHeight - displayHeight) / 2;
+  // Transform bbox
+  const left = offsetX + bbox[0] * scale;
+  const top = offsetY + bbox[1] * scale;
+  const width = (bbox[2] - bbox[0]) * scale;
+  const height = (bbox[3] - bbox[1]) * scale;
+  return {
+    position: "absolute",
+    border: `1.5px solid ${faceBoxColor(idx)}`,
+    background: `${faceBoxColor(idx)}22`,
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${width}px`,
+    height: `${height}px`,
+    pointerEvents: "auto",
+    zIndex: 100,
+    display: "block",
+  };
+}
+
+function getFaceBboxOverlays(img) {
+  return computed(() => {
+    void thumbnailLoadedMap[img.id];
+    void thumbnailRefs[img.id];
+    void faceOverlayRedrawKey.value; // depend on redraw key
+    if (
+      !props.showFaceBboxes ||
+      !img.faces ||
+      !img.faces.length ||
+      !img.width ||
+      !img.height
+    ) {
+      return [];
+    }
+    const el = thumbnailRefs[img.id];
+    if (!el) return [];
+    const firstFrameFaces = img.faces.filter((f) => f.frame_index === 0);
+    for (const face of firstFrameFaces) {
+      console.debug("Face bbox:", face.bbox, "Character:", face.character_id);
+    }
+    return firstFrameFaces.map((face, fidx) => ({
+      style: getFaceBboxStyle(face.bbox, fidx, img, el),
+      idx: fidx,
+    }));
+  });
+}
+
+// Helper for face bbox color palette (copied from ImageOverlay.vue)
+function faceBoxColor(idx) {
+  const palette = [
+    "#ff5252", // red
+    "#40c4ff", // blue
+    "#ffd740", // yellow
+    "#69f0ae", // green
+    "#d500f9", // purple
+    "#ffab40", // orange
+    "#00e676", // teal
+    "#ff4081", // pink
+    "#8d6e63", // brown
+    "#7c4dff", // indigo
+  ];
+  return palette[idx % palette.length];
+}
+
+// Track which image is currently hovered
+const hoveredImageIdx = ref(null);
+
+function handleImageMouseEnter(img) {
+  img._showRes = true;
+  hoveredImageIdx.value = img.idx;
+}
+function handleImageMouseLeave(img) {
+  img._showRes = false;
+  if (hoveredImageIdx.value === img.idx) hoveredImageIdx.value = null;
+}
+
+// Number of images before/after viewport to load thumbnails for
+// Format date to ISO (YYYY-MM-DD HH:mm:ss)
+function formatIsoDate(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
+}
 
 function clearSelection() {
   selectedImageIds.value = [];
@@ -320,57 +602,47 @@ function removeFromGroup() {
   // Remove from character
   if (
     props.selectedCharacter &&
-    props.selectedCharacter !== "__all__" &&
-    props.selectedCharacter !== "__unassigned__"
+    props.selectedCharacter !== props.allPicturesId &&
+    props.selectedCharacter !== props.unassignedPicturesId
   ) {
-    Promise.all(
-      selectedImageIds.value.map((id) =>
-        fetch(`${backendUrl}/pictures/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ primary_character_id: null }),
-        })
-          .then((res) => {
-            if (!res.ok)
-              throw new Error(`Failed to unassign character for image ${id}`);
-          })
-          .catch((err) => {
-            alert(
-              `Error unassigning character for image ${id}: ${err.message}`
-            );
-          })
-      )
-    ).then(() => {
-      // Remove affected images from grid immediately
-      allGridImages.value = allGridImages.value.filter(
-        (img) => !selectedImageIds.value.includes(img.id)
-      );
-      selectedImageIds.value = [];
-      lastSelectedIndex = null;
-      fetchTotalImageCount().then(() => {
-        loadedRanges.value = [];
+    fetch(`${backendUrl}/characters/${props.selectedCharacter}/faces`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ picture_ids: selectedImageIds.value }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to remove images from character`);
+      })
+      .catch((err) => {
+        alert(`Error removing images from character: ${err.message}`);
+      })
+      .finally(() => {
+        // Remove affected images from grid immediately
+        allGridImages.value = allGridImages.value.filter(
+          (img) => !selectedImageIds.value.includes(img.id)
+        );
+        selectedImageIds.value = [];
+        lastSelectedIndex = null;
+        fetchTotalImageCount().then(() => {
+          loadedRanges.value = [];
+          updateVisibleThumbnails();
+          emit("refresh-sidebar");
+        });
         updateVisibleThumbnails();
-        emit("refresh-sidebar");
       });
-      // Ensure thumbnails are refetched for new visible range
-      updateVisibleThumbnails();
-    });
     return;
   }
   // Remove from set
   if (
     props.selectedSet &&
-    props.selectedSet !== "__all__" &&
-    props.selectedSet !== "__unassigned__"
+    props.selectedSet !== props.allPicturesId &&
+    props.selectedSet !== props.unassignedPicturesId
   ) {
     Promise.all(
       selectedImageIds.value.map((id) =>
-        fetch(
-          `${backendUrl}/picture_sets/${props.selectedSet}/pictures/${id}`,
-          {
-            method: "DELETE",
-          }
-        )
+        fetch(`${backendUrl}/picture_sets/${props.selectedSet}/members/${id}`, {
+          method: "DELETE",
+        })
           .then((res) => {
             if (!res.ok)
               throw new Error(`Failed to remove image ${id} from set`);
@@ -440,23 +712,13 @@ const imageImporterRef = ref(null);
 // Handle images-uploaded event from ImageImporter
 async function handleImagesUploaded(newIds) {
   await fetchTotalImageCount();
-  // Do NOT clear thumbnails; keep existing ones
-  // Reset loadedRanges so new thumbnails can be fetched
   loadedRanges.value = [];
+  allGridImages.value = [];
+  selectedImageIds.value = [];
+  lastSelectedIndex = null;
+  await fetchTotalImageCount();
+  updateVisibleThumbnails();
 }
-// Props
-const props = defineProps({
-  thumbnailSize: Number,
-  sidebarVisible: Boolean,
-  backendUrl: String,
-  selectedCharacter: { type: [String, Number, null], default: null },
-  selectedSet: { type: [Number, String, null], default: null },
-  searchQuery: String,
-  selectedSort: String,
-  showStars: Boolean,
-  gridVersion: { type: Number, default: 0 },
-  mediaTypeFilter: { type: String, default: "all" },
-});
 
 watch(
   () => props.gridVersion,
@@ -496,10 +758,16 @@ const selectedGroupName = ref("");
 
 async function updateSelectedGroupName() {
   let name = "";
+  console.log(
+    "Updating selected group name: ",
+    props.selectedCharacter,
+    props.selectedSet,
+    props.allPicturesId
+  );
   if (
     props.selectedCharacter &&
-    props.selectedCharacter !== "__all__" &&
-    props.selectedCharacter !== "__unassigned__"
+    props.selectedCharacter !== `${props.allPicturesId}` &&
+    props.selectedCharacter !== `${props.unassignedPicturesId}`
   ) {
     try {
       const res = await fetch(
@@ -514,11 +782,13 @@ async function updateSelectedGroupName() {
     }
   } else if (
     props.selectedSet &&
-    props.selectedSet !== "__all__" &&
-    props.selectedSet !== "__unassigned__"
+    props.selectedSet !== `${props.allPicturesId}` &&
+    props.selectedSet !== `${props.unassignedPicturesId}`
   ) {
     try {
-      const res = await fetch(`${props.backendUrl}/sets/${props.selectedSet}`);
+      const res = await fetch(
+        `${props.backendUrl}/picture_sets/${props.selectedSet}`
+      );
       if (res.ok) {
         const set = await res.json();
         name = set.name || "";
@@ -546,9 +816,7 @@ let lastSelectedIndex = null;
 // --- Overlay ---
 async function fetchImageInfo(imageId) {
   try {
-    const res = await fetch(
-      `${props.backendUrl}/pictures/${imageId}?info=true`
-    );
+    const res = await fetch(`${props.backendUrl}/pictures/${imageId}/metadata`);
     if (!res.ok) throw new Error("Failed to fetch tags");
     return await res.json();
   } catch (e) {
@@ -584,45 +852,59 @@ async function applyScore(img, newScore) {
     return;
   }
   try {
-    console.debug("PATCH /pictures/", imageId, "?score=", newScore);
-    const res = await fetch(
-      `${props.backendUrl}/pictures/${imageId}?score=${newScore}`,
-      { method: "PATCH" }
+    console.debug(
+      "PATCH /pictures/",
+      imageId,
+      " body: { score:",
+      newScore,
+      "}"
     );
+    const res = await fetch(`${props.backendUrl}/pictures/${imageId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ score: newScore }),
+    });
     if (!res.ok) throw new Error(`Failed to set score for image ${imageId}`);
+
+    // Update score in allGridImages
     const gridImg = allGridImages.value.find((i) => i.id === imageId);
     if (gridImg) {
       gridImg.score = newScore;
     }
+    // Update score in images array if present
+    const idx = loadedRanges.value.findIndex((i) => i.id === imageId);
+    if (idx !== -1) {
+      loadedRanges.value[idx].score = newScore;
+    }
+    // Update overlay image if open and matches
+    if (
+      overlayOpen.value &&
+      overlayImage.value &&
+      overlayImage.value.id === imageId
+    ) {
+      overlayImage.value = { ...overlayImage.value, score: newScore };
+    }
 
-    // Overlay image is not refreshed here; grid stays in sync
+    // If sorting by score, re-sort
     if (
       props.selectedSort.value === "score_desc" ||
       props.selectedSort.value === "score_asc"
     ) {
-      const idx = images.value.findIndex((i) => i.id === imageId);
-      if (idx === -1) return;
-      img.score = newScore;
-      images.value.splice(idx, 1);
-      let insertIdx = 0;
-      if (props.selectedSort.value === "score_desc") {
-        insertIdx = images.value.findIndex((i) => (i.score || 0) < newScore);
-        if (insertIdx === -1) insertIdx = images.value.length;
-      } else {
-        insertIdx = images.value.findIndex((i) => (i.score || 0) > newScore);
-        if (insertIdx === -1) insertIdx = images.value.length;
-      }
-      images.value.splice(insertIdx, 0, img);
+      // Resort images array
+      loadedRanges.value.sort((a, b) => {
+        const sa = a.score || 0;
+        const sb = b.score || 0;
+        return props.selectedSort.value === "score_desc" ? sb - sa : sa - sb;
+      });
       nextTick(() => {
         const grid = gridContainer.value;
         if (!grid) return;
-        const card = grid.querySelectorAll(".image-card")[insertIdx];
+        const newIdx = loadedRanges.value.findIndex((i) => i.id === imageId);
+        const card = grid.querySelectorAll(".image-card")[newIdx];
         if (card && card.scrollIntoView) {
           card.scrollIntoView({ behavior: "smooth", block: "center" });
         }
       });
-    } else {
-      img.score = newScore;
     }
     emit("refresh-sidebar");
   } catch (e) {
@@ -646,8 +928,8 @@ async function handleGridDragEnter(e) {
   const itemCount = e.dataTransfer.items.length;
   if (
     props.selectedCharacter &&
-    props.selectedCharacter !== "__all__" &&
-    props.selectedCharacter !== "__unassigned__"
+    props.selectedCharacter !== props.allPicturesId &&
+    props.selectedCharacter !== props.unassignedPicturesId
   ) {
     const groupLabel = selectedGroupName.value
       ? "for " + selectedGroupName.value
@@ -698,8 +980,8 @@ function handleGridDrop(e) {
     imageImporterRef.value.startImport(files, {
       backendUrl: props.backendUrl,
       selectedCharacterId: props.selectedCharacter,
-      allPicturesId: "__all__",
-      unassignedPicturesId: "__unassigned__",
+      allPicturesId: "ALL",
+      unassignedPicturesId: "UNASSIGNED",
     });
   }
 }
@@ -734,7 +1016,6 @@ function onGlobalKeyPress(key, event) {
 
 // Local state for all image IDs
 // Total image count for paging and 'End' key
-const totalImageCount = ref(0);
 const imagesLoading = ref(false);
 const imagesError = ref(null);
 
@@ -743,16 +1024,24 @@ function buildPictureIdsQueryParams() {
   // If a set is selected, filter by set
   if (
     props.selectedSet &&
-    props.selectedSet !== "__all__" &&
-    props.selectedSet !== "__unassigned__"
+    props.selectedSet !== props.allPicturesId &&
+    props.selectedSet !== props.unassignedPicturesId
   ) {
     params.append("set_id", props.selectedSet);
-  } else if (props.selectedCharacter && props.selectedCharacter !== "__all__") {
-    if (props.selectedCharacter === "__unassigned__") {
-      params.append("primary_character_id", "");
-    } else {
-      params.append("primary_character_id", props.selectedCharacter);
-    }
+  } else if (
+    props.selectedCharacter !== undefined &&
+    props.selectedCharacter !== null &&
+    props.selectedCharacter !== "" &&
+    props.selectedCharacter !== props.allPicturesId
+  ) {
+    params.append("character_id", props.selectedCharacter);
+  }
+
+  if (
+    props.selectedSort === "CHARACTER_LIKENESS" &&
+    props.similarityCharacter
+  ) {
+    params.append("reference_character_id", props.similarityCharacter);
   }
 
   if (props.searchQuery && props.searchQuery.trim()) {
@@ -761,11 +1050,30 @@ function buildPictureIdsQueryParams() {
   if (props.selectedSort && props.selectedSort.trim()) {
     params.append("sort", props.selectedSort.trim());
   }
+  if (typeof props.selectedDescending === "boolean") {
+    console.log(
+      "[ImageGrid.vue] Constructing query with descending:",
+      props.selectedDescending
+    );
+    params.append("descending", props.selectedDescending ? "true" : "false");
+  } else {
+    console.warn(
+      "[ImageGrid.vue] selectedDescending is not boolean, skipping param. Type:",
+      typeof props.selectedDescending
+    );
+  }
   // Add format filter for backend media type filtering
   if (props.mediaTypeFilter === "images") {
-    params.append("format", "PNG");
+    console.log(
+      "[ImageGrid.vue] Building query params for image formats only", PIL_IMAGE_EXTENSIONS
+    );
+    for (const ext of PIL_IMAGE_EXTENSIONS) {
+      params.append("format", ext.toUpperCase());
+    }
   } else if (props.mediaTypeFilter === "videos") {
-    params.append("format", "MP4");
+    for (const ext of VIDEO_EXTENSIONS) {
+      params.append("format", ext.toUpperCase());
+    }
   }
   return params.toString();
 }
@@ -779,8 +1087,8 @@ async function fetchTotalImageCount() {
     // If a set is selected, use /picture_sets/{id}
     if (
       props.selectedSet &&
-      props.selectedSet !== "__all__" &&
-      props.selectedSet !== "__unassigned__"
+      props.selectedSet !== props.allPicturesId &&
+      props.selectedSet !== props.unassignedPicturesId
     ) {
       const url = `${props.backendUrl}/picture_sets/${props.selectedSet}`;
       const res = await fetch(url);
@@ -788,25 +1096,26 @@ async function fetchTotalImageCount() {
       const data = await res.json();
       images = data.pictures || [];
     } else if (props.searchQuery && props.searchQuery.trim()) {
-      // Use /search endpoint for text search
-      const url = `${props.backendUrl}/search?query=${encodeURIComponent(
+      // Use /pictures/search endpoint for text search
+      const params = buildPictureIdsQueryParams();
+      const url = `${
+        props.backendUrl
+      }/pictures/search?query=${encodeURIComponent(
         props.searchQuery.trim()
-      )}&top_n=10000`;
+      )}&top_n=10000${params ? `&${params}` : ""}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to fetch search results");
       images = await res.json();
     } else {
       const params = buildPictureIdsQueryParams();
-      const url = `${props.backendUrl}/pictures?info=true&offset=0&limit=10000&${params}`;
+      // Only use allowed parameters: sort, offset, limit, threshold
+      const url = `${props.backendUrl}/pictures?offset=0&limit=10000${
+        params ? `&${params}` : ""
+      }`;
       const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to fetch image info for all images");
       images = await res.json();
     }
-    totalImageCount.value = images.length;
-    console.debug(
-      "[IMAGE COUNT] Total images for current filters:",
-      totalImageCount.value
-    );
     allGridImages.value = images.map((img, i) => ({
       ...img,
       idx: i,
@@ -814,7 +1123,6 @@ async function fetchTotalImageCount() {
     }));
   } catch (e) {
     imagesError.value = e.message;
-    totalImageCount.value = 0;
     allGridImages.value = [];
   } finally {
     imagesLoading.value = false;
@@ -833,7 +1141,6 @@ watch(
     () => props.selectedSet,
     () => props.searchQuery,
     () => props.selectedSort,
-    () => props.mediaTypeFilter,
   ],
   () => {
     // Reset loaded ranges and thumbnails when filters change
@@ -847,6 +1154,19 @@ watch(
     });
   }
 );
+
+watch([() => props.mediaTypeFilter], () => {
+  // Reset loaded ranges, thumbnails, pagination, and fetch new count/images for filter
+  loadedRanges.value = [];
+  selectedImageIds.value = [];
+  lastSelectedIndex = null;
+  visibleStart.value = 0;
+  visibleEnd.value = 0;
+  allGridImages.value = [];
+  fetchTotalImageCount().then(() => {
+    updateVisibleThumbnails();
+  });
+});
 
 // Track loaded batch ranges to avoid duplicate requests
 const loadedRanges = ref([]);
@@ -879,14 +1199,13 @@ const topSpacerHeight = computed(() => {
   const cols = columns.value;
   const rowsAbove = Math.floor(renderStart.value / cols);
   const height = rowsAbove > 0 ? rowsAbove * rowHeight.value : 1;
-  console.log("topSpacerHeight:", height);
   return height;
 });
 
 const bottomSpacerHeight = computed(() => {
   const cols = columns.value;
   const lastRenderedRow = Math.floor((renderEnd.value - 1) / cols) + 1;
-  const totalRows = Math.ceil(totalImageCount.value / cols);
+  const totalRows = Math.ceil(allGridImages.value.length / cols);
   const rowsBelow = totalRows - lastRenderedRow;
   const height = rowsBelow > 0 ? rowsBelow * rowHeight.value : 0;
   return height;
@@ -895,31 +1214,45 @@ const bottomSpacerHeight = computed(() => {
 // Compute grid images (id, idx, thumbnail)
 const allGridImages = ref([]);
 
+watch(allGridImages, (newVal, oldVal) => {
+  console.log("allGridImages updated:", newVal);
+});
+
 const gridImagesToRender = computed(() => {
+  if (!allGridImages.value) {
+    console.warn("allGridImages is undefined");
+    return [];
+  }
+
   // Only render a window of placeholders/images for performance
-  if (allGridImages.value.length < totalImageCount.value) {
-    for (let i = allGridImages.value.length; i < totalImageCount.value; i++) {
+  if (allGridImages.value.length < allGridImages.value.length) {
+    for (
+      let i = allGridImages.value.length;
+      i < allGridImages.value.length;
+      i++
+    ) {
       allGridImages.value[i] = { id: null, thumbnail: null, idx: i };
     }
   }
-  console.log("Filtering images for mediaTypeFilter:", props.mediaTypeFilter);
-  // Accept both 'all' and 'both' as showing all media
+
   let filtered = allGridImages.value;
   if (props.mediaTypeFilter === "images") {
     filtered = filtered.filter((img) => {
       if (!img) return false;
-      const name = img.filename || img.name || img.id || "";
-      const format = (img.format || "").toLowerCase();
-      return isSupportedImageFile(name) || isSupportedImageFile(format);
+      const candidates = [img.filename, img.name, img.id, img.format]
+        .filter(Boolean)
+        .map((v) => (typeof v === "string" ? v : ""));
+      return candidates.some((val) => isSupportedImageFile(val));
     });
   } else if (props.mediaTypeFilter === "videos") {
     filtered = filtered.filter((img) => {
       if (!img) return false;
-      const name = img.filename || img.name || img.id || "";
-      const format = (img.format || "").toLowerCase();
-      return isSupportedVideoFile(name) || isSupportedVideoFile(format);
+      const candidates = [img.filename, img.name, img.id, img.format]
+        .filter(Boolean)
+        .map((v) => (typeof v === "string" ? v : ""));
+      return candidates.some((val) => isSupportedVideoFile(val));
     });
-  } // else 'all' or 'both' shows everything
+  }
   return filtered.slice(renderStart.value, renderEnd.value);
 });
 
@@ -928,11 +1261,11 @@ async function fetchThumbnailsBatch(start, end) {
   start = renderStart.value;
   end = renderEnd.value;
 
-  console.debug(
+  /* console.debug(
     `[BATCH REQUEST] start=${start}, end=${end}, loadedRanges=${JSON.stringify(
       loadedRanges.value
     )}`
-  );
+  ); */
   // Check if this batch range is already loaded
   for (const range of loadedRanges.value) {
     if (start >= range[0] && end <= range[1]) {
@@ -946,8 +1279,8 @@ async function fetchThumbnailsBatch(start, end) {
     // If a set is selected, use /picture_sets/{id}
     if (
       props.selectedSet &&
-      props.selectedSet !== "__all__" &&
-      props.selectedSet !== "__unassigned__"
+      props.selectedSet !== props.allPicturesId &&
+      props.selectedSet !== props.unassignedPicturesId
     ) {
       const url = `${props.backendUrl}/picture_sets/${props.selectedSet}`;
       const res = await fetch(url);
@@ -963,9 +1296,10 @@ async function fetchThumbnailsBatch(start, end) {
       // If not enough images, fetch missing ones
       if (images.length < end - start) {
         const params = buildPictureIdsQueryParams();
+        // Only use allowed parameters: sort, offset, limit, threshold
         const url = `${props.backendUrl}/pictures?offset=${start}&limit=${
           end - start
-        }&${params}`;
+        }${params ? `&${params}` : ""}`;
         const res = await fetch(url);
         if (res.ok) {
           const fetched = await res.json();
@@ -982,10 +1316,10 @@ async function fetchThumbnailsBatch(start, end) {
         }
       }
     }
-    console.debug(
+    /* console.debug(
       `[BATCH RESPONSE] Received ${images.length} images:`,
       images.map((img) => img.id)
-    );
+    ); */
     // Prepare grid image objects
     const gridImages = images.map((img, idx) => ({
       ...img,
@@ -995,7 +1329,7 @@ async function fetchThumbnailsBatch(start, end) {
     }));
     // Now fetch thumbnails for these IDs
     if (ids.length) {
-      const thumbRes = await fetch(`${props.backendUrl}/thumbnails`, {
+      const thumbRes = await fetch(`${props.backendUrl}/pictures/thumbnails`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids }),
@@ -1003,20 +1337,19 @@ async function fetchThumbnailsBatch(start, end) {
       if (thumbRes.ok) {
         const thumbData = await thumbRes.json();
         for (const gridImg of gridImages) {
-          gridImg.thumbnail = thumbData[gridImg.id]
-            ? `data:image/png;base64,${thumbData[gridImg.id]}`
-            : null;
+          const thumbObj = thumbData[gridImg.id];
+          gridImg.thumbnail =
+            thumbObj && thumbObj.thumbnail
+              ? `data:image/png;base64,${thumbObj.thumbnail}`
+              : null;
+          gridImg.faces =
+            thumbObj && Array.isArray(thumbObj.faces) ? thumbObj.faces : [];
         }
       } else {
         for (const gridImg of gridImages) {
           gridImg.thumbnail = null;
+          gridImg.faces = [];
         }
-      }
-    }
-    // Ensure allGridImages.value is sized to totalImageCount
-    if (allGridImages.value.length < totalImageCount.value) {
-      for (let i = allGridImages.value.length; i < totalImageCount.value; i++) {
-        allGridImages.value[i] = { id: null, thumbnail: null, idx: i };
       }
     }
     // Insert/update images at their correct indices
@@ -1034,7 +1367,7 @@ async function fetchThumbnailsBatch(start, end) {
 function updateVisibleThumbnails() {
   let start = Math.max(0, visibleStart.value - divisibleViewWindow.value);
   let end = Math.min(
-    totalImageCount.value,
+    allGridImages.value.length,
     visibleEnd.value + divisibleViewWindow.value
   );
   console.log(
@@ -1046,7 +1379,7 @@ function updateVisibleThumbnails() {
     visibleStart.value,
     visibleEnd.value,
     "Total:",
-    totalImageCount.value
+    allGridImages.value.length
   );
 
   // Debounce fetches to avoid excessive requests
@@ -1239,15 +1572,30 @@ function handleKeyDown(event) {
     selectedImageIds.value = Array.from(allIds);
     console.log("[CTRL+A] selectedImageIds:", selectedImageIds.value);
     lastSelectedIndex = null;
+  } else if (
+    hoveredImageIdx.value !== null &&
+    selectedImageIds.value.length === 0 &&
+    !overlayOpen.value &&
+    /^[1-5]$|^0$/.test(event.key)
+  ) {
+    // Number key pressed, set score for hovered image
+    const idx = hoveredImageIdx.value;
+    const img = allGridImages.value[idx];
+    if (img && img.id) {
+      let score = parseInt(event.key, 10);
+      if (score === 0) score = 5;
+      setScore(img, score);
+      event.preventDefault();
+    }
   }
 }
 
 watch(
   () => props.thumbnailSize,
   () => {
-    updateColumns();
     // Recalculate visibleStart and visibleEnd after columns/rowHeight update
     nextTick(() => {
+      updateColumns();
       const el = scrollWrapper.value;
       if (!el) return;
       let cardHeight = rowHeight.value;
@@ -1277,33 +1625,47 @@ defineExpose({
   onGlobalKeyPress,
   updateVisibleThumbnails,
   exportCurrentViewToZip,
+  removeImagesById,
 });
+
+// Remove images by ID (for event-driven removal)
+function removeImagesById(imageIds) {
+  if (!Array.isArray(imageIds) || !imageIds.length) {
+    console.log("No image IDs provided for removal.");
+    return;
+  }
+  console.log("Removing images by ID:", imageIds);
+  allGridImages.value = allGridImages.value.filter(
+    (img) => !imageIds.includes(img.id)
+  );
+  selectedImageIds.value = selectedImageIds.value.filter(
+    (id) => !imageIds.includes(id)
+  );
+  updateVisibleThumbnails();
+}
 
 // --- Export to Zip ---
 async function exportCurrentViewToZip() {
   // Build query params for current view
-  let url = `${props.backendUrl}/export/zip`;
+  let url = `${props.backendUrl}/pictures/export`;
   const params = buildPictureIdsQueryParams();
   if (params) {
     url += `?${params}`;
-  }
-  // If viewing a set, send set_id as param
-  if (
-    props.selectedSet &&
-    props.selectedSet !== "__all__" &&
-    props.selectedSet !== "__unassigned__"
-  ) {
-    url += params
-      ? `&set_id=${props.selectedSet}`
-      : `?set_id=${props.selectedSet}`;
   }
   try {
     const res = await fetch(url, { method: "GET" });
     if (!res.ok) throw new Error("Failed to export zip");
     const blob = await res.blob();
+    // Extract filename from Content-Disposition header
+    let filename = "pixlvault_export.zip";
+    const disposition = res.headers.get("Content-Disposition");
+    if (disposition) {
+      const match = disposition.match(/filename=\"?([^\";]+)\"?/);
+      if (match) filename = match[1];
+    }
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = "pixlvault_export.zip";
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     setTimeout(() => {
@@ -1314,7 +1676,46 @@ async function exportCurrentViewToZip() {
     alert("Export failed: " + (e.message || e));
   }
 }
+
+// Search functionality
+const searchQuery = ref(props.searchQuery);
+const { visible, openSearchOverlay, closeSearchOverlay } = useSearchOverlay();
+
+function handleSearch(query) {
+  console.log("Search triggered with query:", query);
+  searchQuery.value = query;
+  props.searchQuery = query;
+  fetchTotalImageCount(); // Refresh the grid based on the new search query
+}
+
+onMounted(() => {
+  console.log("ImageGrid mounted. Initial search query:", searchQuery.value);
+});
+
+watch(searchQuery, (newQuery) => {
+  console.log("Search query updated:", newQuery);
+});
+
+// Function to clear searchQuery
+function clearSearchQuery() {
+  console.log("[ImageGrid.vue] clearSearchQuery called");
+  emit("clear-search", "");
+}
+
+// Watch for changes in allGridImages and log the length asynchronously
+watch(
+  () => allGridImages.value,
+  async (newImages) => {
+    if (newImages) {
+      const resultCount = newImages.length;
+      console.log("Number of search results:", resultCount);
+      // Perform any additional asynchronous operations here
+      await someAsyncOperation(resultCount);
+    }
+  }
+);
 </script>
+
 <style scoped>
 .drag-overlay {
   position: absolute;
@@ -1332,6 +1733,17 @@ async function exportCurrentViewToZip() {
   color: #ffffff;
   font-size: 3em;
   font-weight: bold;
+}
+.face-bbox-overlay span {
+  white-space: pre-line;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-width: 90px;
+  display: block;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  max-height: 1.1em;
 }
 .grid-scroll-wrapper {
   height: 100vh; /* or calc(100vh - headerHeight) if you have a header */
@@ -1423,22 +1835,22 @@ async function exportCurrentViewToZip() {
   text-align: center;
   min-height: 1.2em;
   background: none;
-  
 }
 .thumbnail-info {
-  font-size: 1.0em;
+  font-size: 1em;
   color: #222;
   text-align: center;
   word-break: break-all;
 }
 .thumbnail-container {
   width: 100%;
+  height: 100%;
   position: relative;
-  display: block;
   aspect-ratio: 1 / 1;
 }
 .thumbnail-img {
   width: 100%;
+  height: 100%;
   aspect-ratio: 1 / 1;
   object-fit: cover;
   display: block;
@@ -1446,6 +1858,7 @@ async function exportCurrentViewToZip() {
   position: absolute;
   top: 0;
   left: 0;
+  z-index: 1;
   transition: transform 0.18s cubic-bezier(0.4, 2, 0.6, 1), box-shadow 0.18s;
 }
 /* Spinner for thumbnail loading */
@@ -1472,6 +1885,7 @@ async function exportCurrentViewToZip() {
   }
 }
 .thumbnail-container:hover .thumbnail-img,
+.thumbnail-container:hover .thumbnail-img,
 .thumbnail-container:focus-within .thumbnail-img {
   transform: scale(1.02);
   box-shadow: 0 4px 24px 0 rgba(25, 118, 210, 0.2),
@@ -1479,7 +1893,6 @@ async function exportCurrentViewToZip() {
   z-index: 2;
   transition: transform 0.18s cubic-bezier(0.4, 2, 0.6, 1), box-shadow 0.18s;
 }
-
 .thumbnail-card {
   width: 100%;
   max-width: none;
@@ -1489,5 +1902,47 @@ async function exportCurrentViewToZip() {
 /* Overlay for image index on thumbnail */
 .thumbnail-index-overlay {
   pointer-events: none;
+}
+
+/* Add a button to trigger the search overlay */
+.search-button {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 50px;
+  height: 50px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.clear-search-btn {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  z-index: 1000;
+  background-color: red !important; /* Temporary debug styling */
+  color: white;
+  border: 2px solid black;
+}
+
+.search-result-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  z-index: 1000;
+  background-color: #f5f5f5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.1);
 }
 </style>

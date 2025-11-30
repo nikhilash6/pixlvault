@@ -8,13 +8,15 @@ import csv
 import numpy as np
 import onnxruntime as ort
 import os
+import platform
 import re
 import torch
 
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 
-from .logging import get_logger
+from .pixl_logging import get_logger
+from pixlvault.db_models.picture import Picture
 from pixlvault.tag_naturaliser import TagNaturaliser
 from pixlvault.image_loading_dataset_prepper import ImageLoadingDatasetPrepper
 
@@ -55,11 +57,13 @@ class PictureTagger:
         silent=True,
         device=None,
     ):
+        logger.info("Initializing PictureTagger...")
         self._model_location = model_location
         self._silent = silent
 
         # Store device for both CLIP and ONNX
         if PictureTagger.FORCE_CPU:
+            logger.warning("Forcing CPU inference for PictureTagger.")
             self._device = "cpu"
         else:
             if device is not None:
@@ -67,7 +71,15 @@ class PictureTagger:
             else:
                 self._device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        logger.debug(f"PictureTagger initialized with device: {self._device}")
+        if self._device == "cuda":
+            providers = ort.get_available_providers()
+            if "CUDAExecutionProvider" not in providers:
+                logger.warning(
+                    "No GPU ort providers available, forcing CPUExecutionProvider"
+                )
+                self._device = "cpu"
+
+        logger.info(f"PictureTagger initialized with device: {self._device}")
 
         self._ensure_model_files(force_download=force_download)
         self._init_onnx_session()
@@ -93,7 +105,7 @@ class PictureTagger:
         self._florence_device = None
         self._florence_model_name = "microsoft/Florence-2-base"
 
-        self._florence_max_tokens = 40 if PictureTagger.FAST_CAPTIONS else 60
+        self._florence_max_tokens = 40 if PictureTagger.FAST_CAPTIONS else 120
 
         self._init_florence_captioning()
 
@@ -102,17 +114,59 @@ class PictureTagger:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def close(self):
         # Release ONNX/PyTorch resources here
         # For ONNX: self.session = None
         # For PyTorch: del self.model; torch.cuda.empty_cache()
         import gc
 
-        del self._clip_model
-        self.ort_sess = None
-        torch.cuda.empty_cache()
+        logger.warning("PictureTagger.close() called, releasing resources...")
+        # Explicitly delete all large model objects and set to None
+        try:
+            if hasattr(self, "_clip_model"):
+                del self._clip_model
+                self._clip_model = None
+                logger.debug("Deleted _clip_model.")
+            if hasattr(self, "ort_sess"):
+                del self.ort_sess
+                self.ort_sess = None
+                logger.debug("Deleted ort_sess.")
+            if hasattr(self, "_florence_model"):
+                del self._florence_model
+                self._florence_model = None
+                logger.debug("Deleted _florence_model.")
+            if hasattr(self, "_florence_processor"):
+                del self._florence_processor
+                self._florence_processor = None
+                logger.debug("Deleted _florence_processor.")
+            if hasattr(self, "_florence_device"):
+                del self._florence_device
+                self._florence_device = None
+                logger.debug("Deleted _florence_device.")
+            if hasattr(self, "_sbert_model"):
+                del self._sbert_model
+                self._sbert_model = None
+                logger.debug("Deleted _sbert_model.")
+            if hasattr(self, "_tag_naturaliser"):
+                del self._tag_naturaliser
+                self._tag_naturaliser = None
+                logger.debug("Deleted _tag_naturaliser.")
+            if hasattr(self, "_clip_preprocess"):
+                del self._clip_preprocess
+                self._clip_preprocess = None
+                logger.debug("Deleted _clip_preprocess.")
+            if hasattr(self, "_clip_tokenizer"):
+                del self._clip_tokenizer
+                self._clip_tokenizer = None
+                logger.debug("Deleted _clip_tokenizer.")
+        except Exception as cleanup_error:
+            logger.warning(f"Exception during PictureTagger cleanup: {cleanup_error}")
 
+        torch.cuda.empty_cache()
         gc.collect()
-        logger.debug("PictureTagger.exit called, resources released.")
+        logger.debug("PictureTagger.__exit__ called, all resources released.")
 
     def max_concurrent_images(self):
         if self._device == "cpu":
@@ -242,19 +296,19 @@ class PictureTagger:
             )
             return False
 
-    def _generate_florence_caption(
-        self, image_path, character_name=None, _retry_on_cpu=True
-    ):
+    def _generate_florence_caption(self, image_path, _retry_on_cpu=True):
         """
         Generate a natural language caption for an image using Florence-2.
 
         Args:
             image_path (str): Path to the image file
-            character_name (str, optional): Name of the character to include as context
 
         Returns:
             str: Natural language caption
         """
+        logger.debug(
+            f"_generate_florence_caption called: image_path={image_path}, _retry_on_cpu={_retry_on_cpu}"
+        )
         if self._florence_model is None:
             logger.error("Florence-2 model is not initialized")
             return None
@@ -400,19 +454,8 @@ class PictureTagger:
                     caption = caption[: last_punct + 1].strip()
                 if caption:
                     logger.debug(f"Florence-2 caption: {caption}")
-            # Insert character name if provided
-            if caption and character_name:
-                person_pattern = r"\b(woman|man|person|girl|boy|lady|gentleman|individual|figure|character)\b"
-                match = re.search(person_pattern, caption, re.IGNORECASE)
-                if match:
-                    insert_pos = match.end()
-                    caption = (
-                        caption[:insert_pos]
-                        + f" named {character_name}"
-                        + caption[insert_pos:]
-                    )
-                else:
-                    caption = f"{character_name}: {caption}"
+
+            logger.debug(f"Final Florence-2 caption returned: {caption}")
             return caption
 
         except Exception as e:
@@ -430,7 +473,7 @@ class PictureTagger:
                 )
                 if self._reload_florence_on_cpu():
                     return self._generate_florence_caption(
-                        image_path, character_name, _retry_on_cpu=False
+                        image_path, _retry_on_cpu=False
                     )
 
             logger.error(f"Florence-2 captioning failed for {image_path}: {e}")
@@ -607,43 +650,6 @@ class PictureTagger:
         ]
         return texts
 
-    @classmethod
-    def _collect_text(cls, obj, visited=None):
-        if visited is None:
-            visited = set()
-        texts = []
-        obj_id = id(obj)
-        if obj is None or obj_id in visited:
-            return texts
-        visited.add(obj_id)
-        if isinstance(obj, str):
-            if obj.strip():
-                texts.append(obj.strip())
-        elif isinstance(obj, dict):
-            for k, v in obj.items():
-                if k == "tags" and isinstance(v, (list, tuple, set)):
-                    texts.extend([t for t in v if t])
-                else:
-                    texts.extend(cls._collect_text(v, visited))
-        elif isinstance(obj, (list, tuple, set)):
-            for item in obj:
-                texts.extend(cls._collect_text(item, visited))
-        elif hasattr(obj, "__dict__"):
-            # Only process dataclasses with explicit include_in_text_embedding metadata
-            import dataclasses
-
-            if dataclasses.is_dataclass(obj):
-                for field in dataclasses.fields(obj):
-                    if field.metadata.get("include_in_text_embedding", False):
-                        value = getattr(obj, field.name)
-                        if field.name == "tags" and isinstance(
-                            value, (list, tuple, set)
-                        ):
-                            texts.extend([t for t in value if t])
-                        else:
-                            texts.extend(cls._collect_text(value, visited))
-        return texts
-
     def tag_images(self, image_paths):
         """
         Tag images using the WD14 tagger model.
@@ -665,7 +671,16 @@ class PictureTagger:
             max_concurrent = MAX_CONCURRENT_IMAGES_CPU
         else:
             max_concurrent = MAX_CONCURRENT_IMAGES_GPU
-        worker_count = min(max_concurrent, os.cpu_count() // 2 or 1, len(image_paths))
+
+        # On macOS, multiprocessing uses 'spawn' which requires pickling.
+        # ONNX InferenceSession cannot be pickled, so disable workers on macOS.
+        if platform.system() == "Darwin":
+            worker_count = 0
+        else:
+            worker_count = min(
+                max_concurrent, os.cpu_count() // 2 or 1, len(image_paths)
+            )
+
         logger.debug(
             "Starting tagger dataloader with worker count: "
             + str(worker_count)
@@ -725,29 +740,15 @@ class PictureTagger:
         logger.debug(f"Completed tagging for {len(all_results)} images.")
         return self._merge_video_frame_tags(all_results)
 
-    def generate_description(self, picture, character=None):
-        florence_caption = self._generate_florence_caption(picture.file_path)
+    def generate_description(self, picture):
+        logger.debug(
+            f"generate_description: picture.file_path={getattr(picture, 'file_path', None)}"
+        )
+        florence_caption = self._generate_florence_caption(
+            picture.file_path,
+            _retry_on_cpu=False,
+        )
         if florence_caption:
-            character_name_capitalized = None
-            if character and hasattr(character, "name") and character.name:
-                character_name_capitalized = " ".join(
-                    word.capitalize() for word in character.name.split()
-                )
-                import re
-
-                person_pattern = r"\b(a young woman|a woman|the woman|a young man|a man|the man|a person|the person)\b"
-                match = re.search(person_pattern, florence_caption, re.IGNORECASE)
-                if match:
-                    insert_pos = match.end()
-                    florence_caption = (
-                        florence_caption[:insert_pos]
-                        + f" named {character_name_capitalized}"
-                        + florence_caption[insert_pos:]
-                    )
-                else:
-                    florence_caption = (
-                        f"{character_name_capitalized}. {florence_caption}"
-                    )
             logger.debug(
                 f"Text embedding: using Florence-2 caption: {florence_caption}"
             )
@@ -759,35 +760,70 @@ class PictureTagger:
             raise RuntimeError("Florence captioning failed.")
         return florence_caption
 
-    def generate_text_embedding(self, picture, character=None):
+    # Naive flatten
+    @classmethod
+    def _flatten_texts(cls, texts):
+        flat = []
+
+        characters = texts.get("characters") or []
+
+        # Compose prefix
+        prefix = ""
+        if characters:
+            if len(characters) == 1:
+                prefix = f"A picture of {characters[0]['name']}. "
+            else:
+                prefix = "A picture of "
+                prefix += ", ".join([char["name"] for char in characters[:-1]])
+                prefix += f" and {characters[-1]['name']}. "
+            flat.append(prefix)
+
+        if texts.get("description"):
+            flat.append(str(texts["description"]))
+
+        for char in characters:
+            if char.get("description"):
+                flat.append(str(char["description"]))
+            if char.get("original_prompt"):
+                flat.append(str(char["original_prompt"]))
+
+        return flat
+
+    def generate_text_embedding(self, picture: Picture = None, query: str = None):
         """
         Generate a SBERT embedding from all text found in character and picture objects (recursively), avoiding cycles.
         Returns text_embedding and full_text.
         """
+        if picture is None and query is None:
+            raise ValueError("Either picture or query_string must be provided.")
 
-        texts = []
-        if character:
-            texts.extend(self._collect_text(character))
         if picture:
-            texts.extend(self._collect_text(picture))
-        texts = self._filter_texts(texts)
-        logger.debug(f"Text Embedding: texts used for embedding (filtered): {texts}")
-        if not texts:
-            logger.error(
-                "Text Embedding: No text data for embedding. character=%s, picture=%s",
-                character,
-                picture,
+            texts = picture.text_embedding_data()
+            flat_texts = PictureTagger._flatten_texts(texts)
+            filtered_texts = self._filter_texts(flat_texts)
+            if not filtered_texts:
+                logger.error(
+                    "Text Embedding: No text data for embedding. picture=%s",
+                    picture,
+                )
+                raise ValueError("No text data for embedding.")
+            if len(picture.characters) > 0:
+                logger.info(
+                    f"Text Embedding: texts used for embedding (filtered): {filtered_texts}"
+                )
+            full_text = ". ".join(filtered_texts)
+        else:
+            full_text = query
+            logger.debug(
+                f"Text Embedding: using query_string for embedding: {full_text}"
             )
-            raise ValueError("No text data for embedding.")
-        logger.debug(f"Text Embedding: tags going into description: {texts}")
-        full_text = self._tag_naturaliser.tags_to_sentence(texts)
+
         full_text = full_text.lower()
-        logger.debug(f"Text Embedding: full_text for SBERT: {full_text}")
 
         # Generate text embedding using SBERT
         sbert_model = getattr(self, "_sbert_model", None)
         if sbert_model is None:
-            sbert_model = SentenceTransformer("all-MiniLM-L6-v2")
+            sbert_model = SentenceTransformer("all-MiniLM-L6-v2", device=self._device)
             self._sbert_model = sbert_model
 
         text_embedding = None
@@ -806,73 +842,79 @@ class PictureTagger:
                 raise
         return text_embedding, full_text
 
-    def generate_facial_features(self, picture):
+    def generate_facial_features(self, picture, face_bboxes):
         """
-        Generate facial features from picture object if face_bbox is present.
-        Returns facial_features or None.
+        Generate facial features for a list of face_bboxes in a picture.
+        Returns a list of facial_features (np.ndarray or None) for each bbox.
         """
-        facial_features = None
-        if (
-            picture
-            and hasattr(picture, "file_path")
-            and hasattr(picture, "face_bbox")
-            and picture.face_bbox
-        ):
-            try:
-                from pixlvault.picture_utils import PictureUtils
-                import os
+        from pixlvault.picture_utils import PictureUtils
+        import os
+        import torch
+        from PIL import Image
 
-                ext = os.path.splitext(picture.file_path)[1].lower()
-                video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
-                if ext in video_exts:
-                    import cv2
+        file_path = (
+            picture.file_path if hasattr(picture, "file_path") else picture["file_path"]
+        )
+        ext = os.path.splitext(file_path)[1].lower()
+        video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+        facial_features_list = []
+        face_crops = []
 
-                    cap = cv2.VideoCapture(picture.file_path)
-                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                    for idx in range(frame_count):
-                        ret, frame = cap.read()
-                        if not ret or frame is None:
-                            continue
-                        face_crop = PictureUtils.crop_face_from_frame(
-                            frame, picture.face_bbox
-                        )
-                        if face_crop is not None:
-                            if isinstance(face_crop, np.ndarray):
-                                from PIL import Image
+        # Load image or first frame for all crops
+        if ext in video_exts:
+            import cv2
 
-                                face_crop = Image.fromarray(
-                                    cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
-                                )
-                            img_input = (
-                                self._clip_preprocess(face_crop)
-                                .unsqueeze(0)
-                                .to(self._clip_device)
-                            )
-                            with torch.no_grad():
-                                facial_features = (
-                                    self._clip_model.encode_image(img_input)
-                                    .cpu()
-                                    .numpy()[0]
-                                )
-                            break
-                    cap.release()
+            cap = cv2.VideoCapture(file_path)
+            ret, frame = cap.read()
+            cap.release()
+            if not ret or frame is None:
+                frame = None
+            for bbox in face_bboxes:
+                if frame is not None:
+                    crop = PictureUtils.crop_face_from_frame(frame, bbox)
+                    if crop is not None and isinstance(crop, np.ndarray):
+                        crop = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+                    face_crops.append(crop)
                 else:
-                    face_crop = PictureUtils.load_and_crop_face_bbox(
-                        picture.file_path, picture.face_bbox
-                    )
-                    if face_crop is not None:
-                        img_input = (
-                            self._clip_preprocess(face_crop)
-                            .unsqueeze(0)
-                            .to(self._clip_device)
-                        )
-                        with torch.no_grad():
-                            facial_features = (
-                                self._clip_model.encode_image(img_input)
-                                .cpu()
-                                .numpy()[0]
-                            )
+                    face_crops.append(None)
+        else:
+            for bbox in face_bboxes:
+                crop = PictureUtils.load_and_crop_square_image_with_face(
+                    file_path, bbox
+                )
+                face_crops.append(crop)
+
+        # Try to get a human-friendly description for logging
+        pic_desc = getattr(picture, "description", None)
+        if not pic_desc:
+            pic_desc = file_path
+
+        for i, crop in enumerate(face_crops):
+            if crop is None:
+                logger.warning(
+                    f"Face crop is None for picture '{pic_desc}', bbox={face_bboxes[i]}"
+                )
+                facial_features_list.append(None)
+                continue
+            logger.debug(
+                f"Face crop type for picture '{pic_desc}', bbox={face_bboxes[i]}: {type(crop)}"
+            )
+            if hasattr(crop, "size"):
+                logger.debug(f"Face crop size: {crop.size}")
+            try:
+                img_input = (
+                    self._clip_preprocess(crop).unsqueeze(0).to(self._clip_device)
+                )
+                with torch.no_grad():
+                    features = self._clip_model.encode_image(img_input).cpu().numpy()[0]
+                logger.debug(
+                    f"Extracted features for picture '{pic_desc}', bbox={face_bboxes[i]}: {features[:5]}... (shape: {features.shape})"
+                )
+                facial_features_list.append(features)
             except RuntimeError as e:
+                logger.error(
+                    f"RuntimeError for picture '{pic_desc}', bbox={face_bboxes[i]}: {e}"
+                )
                 if (
                     ("CUDA out of memory" in str(e))
                     or ("not compatible" in str(e))
@@ -881,59 +923,107 @@ class PictureTagger:
                     self._clip_device = "cpu"
                     self._clip_model = self._clip_model.to(self._clip_device)
                     try:
-                        if face_crop is not None:
-                            img_input = (
-                                self._clip_preprocess(face_crop)
-                                .unsqueeze(0)
-                                .to(self._clip_device)
+                        img_input = (
+                            self._clip_preprocess(crop)
+                            .unsqueeze(0)
+                            .to(self._clip_device)
+                        )
+                        with torch.no_grad():
+                            features = (
+                                self._clip_model.encode_image(img_input)
+                                .cpu()
+                                .numpy()[0]
                             )
-                            with torch.no_grad():
-                                facial_features = (
-                                    self._clip_model.encode_image(img_input)
-                                    .cpu()
-                                    .numpy()[0]
-                                )
-                    except Exception:
-                        facial_features = None
+                        logger.debug(
+                            f"Extracted features (CPU fallback) for picture '{pic_desc}', bbox={face_bboxes[i]}: {features[:5]}... (shape: {features.shape})"
+                        )
+                        facial_features_list.append(features)
+                    except Exception as e2:
+                        logger.error(
+                            f"CPU fallback failed for picture '{pic_desc}', bbox={face_bboxes[i]}: {e2}"
+                        )
+                        facial_features_list.append(None)
                 else:
-                    facial_features = None
-        return facial_features
+                    facial_features_list.append(None)
+            except Exception as e:
+                logger.error(
+                    f"Exception for picture '{pic_desc}', bbox={face_bboxes[i]}: {e}"
+                )
+                facial_features_list.append(None)
+        return facial_features_list
 
-    def correct_tags_with_florence(self, florence_desc, current_tags=None):
+    def preprocess_query_words(self, words, top_k=3):
         """
-        Use Florence-2 description to extract candidate tags and update image tags.
-        Returns corrected tag list.
+        Preprocess a list of query words for semantic search:
+        - Expand with up to top_k ranked synonyms for each word (≥4 letters, single-word only)
+        - Add 'woman' if 'she' or 'her' is present, 'man' if 'he' or 'him' is present
+        Returns a list of deduplicated, relevant words.
         """
-        try:
-            import spacy
+        # Remove prepositions and filter words
+        prepositions = {
+            "about",
+            "above",
+            "across",
+            "after",
+            "against",
+            "along",
+            "among",
+            "around",
+            "at",
+            "before",
+            "behind",
+            "below",
+            "beneath",
+            "beside",
+            "between",
+            "beyond",
+            "but",
+            "by",
+            "concerning",
+            "despite",
+            "down",
+            "during",
+            "except",
+            "for",
+            "from",
+            "in",
+            "inside",
+            "into",
+            "like",
+            "near",
+            "of",
+            "off",
+            "on",
+            "onto",
+            "out",
+            "outside",
+            "over",
+            "past",
+            "regarding",
+            "since",
+            "through",
+            "throughout",
+            "to",
+            "toward",
+            "under",
+            "underneath",
+            "until",
+            "up",
+            "upon",
+            "with",
+            "within",
+            "without",
+            "have",
+            "were",
+        }
+        cleaned = []
+        lower_words = [w.lower() for w in words]
+        for word in lower_words:
+            if word == "she" or word == "her":
+                cleaned.append("woman")
+            elif word == "he" or word == "him":
+                cleaned.append("man")
+            elif len(word) > 3 and word not in prepositions:
+                cleaned.append(word)
 
-            nlp = None
-            try:
-                nlp = spacy.load("en_core_web_sm")
-            except OSError:
-                import spacy.cli
-
-                spacy.cli.download("en_core_web_sm")
-            assert nlp is not None, "Failed to load spaCy model"
-            doc = nlp(florence_desc)
-            candidates = set()
-            for token in doc:
-                if token.pos_ in ("NOUN", "PROPN", "ADJ") and len(token.text) > 2:
-                    candidates.add(token.lemma_.lower())
-            # Map candidates to known tags using tag_naturaliser
-            mapped_tags = []
-            for cand in candidates:
-                nat_tag = TagNaturaliser.get_natural_tag(cand)
-                if nat_tag:
-                    mapped_tags.append(nat_tag)
-                else:
-                    mapped_tags.append(cand)
-            # Optionally merge with current tags
-            if current_tags:
-                # Keep tags that are in both or add new ones
-                merged = set(current_tags) | set(mapped_tags)
-                return sorted(merged)
-            return sorted(mapped_tags)
-        except Exception as e:
-            logger.error(f"Failed to extract tags from Florence description: {e}")
-            return current_tags or []
+        return cleaned

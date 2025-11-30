@@ -13,13 +13,13 @@ import SideBar from "./components/SideBar.vue";
 import ImageGrid from "./components/ImageGrid.vue";
 import LikenessRows from "./components/LikenessRows.vue";
 import ChatWindow from "./components/ChatWindow.vue";
+import SearchBar from "./components/SearchBar.vue";
 
 const likenessRowsRef = ref(null);
 
-// --- Backend Constants & Identifiers ---
 const BACKEND_URL = "http://localhost:9537";
-const ALL_PICTURES_ID = "__all__";
-const UNASSIGNED_PICTURES_ID = "__unassigned__";
+const ALL_PICTURES_ID = "ALL";
+const UNASSIGNED_PICTURES_ID = "UNASSIGNED";
 
 // --- Template & Component Refs ---
 const gridContainer = ref(null);
@@ -31,11 +31,12 @@ const sidebarRef = ref(null);
 const selectedCharacter = ref(ALL_PICTURES_ID);
 const selectedSet = ref(null);
 const selectedSort = ref("");
+const selectedDescending = ref(false);
 
 // --- Search & Filtering State ---
 const searchQuery = ref("");
 const showStars = ref(true);
-
+const showFaceBboxes = ref(false);
 
 const chatWindowRef = ref(null);
 
@@ -43,7 +44,7 @@ const thumbnailSize = ref(256);
 const sidebarVisible = ref(true);
 
 // --- Media Type Filter State ---
-const mediaTypeFilter = ref('all'); // 'all', 'images', 'videos'
+const mediaTypeFilter = ref("all"); // 'all', 'images', 'videos'
 
 // --- Chat Overlay State ---
 const chatOpen = ref(false);
@@ -94,25 +95,37 @@ async function handleSwitchToGrid() {
 }
 
 async function handleSelectCharacter(charId) {
+  console.log("[App.vue] handleSelectCharacter called with charId:", charId);
   selectedCharacter.value = charId;
   selectedSet.value = null; // Clear set selection
+  searchQuery.value = ""; // Clear search query
+  await nextTick(); // Ensure reactivity propagates the change
+  console.log("[App.vue] searchQuery cleared:", searchQuery.value);
   handleSwitchToGrid();
 }
 
 async function handleSelectSet(setId) {
   selectedSet.value = setId;
   selectedCharacter.value = null; // Clear character selection
+  searchQuery.value = ""; // Clear search query
   handleSwitchToGrid();
 }
 
 async function handleUpdateSearchQuery(value) {
-  searchQuery.value = value;
+  searchQuery.value = typeof value === "string" ? value : ""; // Ensure searchQuery is always a string
   handleSwitchToGrid();
 }
 
-async function handleUpdateSelectedSort(value) {
-  selectedSort.value = value;
+async function handleUpdateSelectedSort({ sort, descending }) {
+  selectedSort.value = sort;
+  selectedDescending.value = descending;
   handleSwitchToGrid();
+}
+
+const selectedSimilarityCharacter = ref(null);
+function handleUpdateSimilarityCharacter(val) {
+  selectedSimilarityCharacter.value = val;
+  refreshGridVersion();
 }
 
 // --- Settings & Config ---
@@ -220,24 +233,36 @@ async function updateSelectedRoot() {
   }
 }
 
-async function patchConfigUIOptions(opts = {}) {
-  const patch = {
-    sort: selectedSort.value,
-    thumbnail: thumbnailSize.value,
-    show_stars: showStars.value,
-    likeness_threshold: config.likeness_threshold,
-    openai_host: config.openai_host,
-    openai_port: config.openai_port,
-    openai_model: config.openai_model,
-    default_device: config.default_device,
-    ...opts,
-  };
-  Object.assign(config, patch);
-  await fetch(`${BACKEND_URL}/config`, {
+async function patchConfigUIOptions() {
+  // Only include fields the backend expects and that are not undefined/null/empty
+  const patch = {};
+  if (selectedSort.value) patch.sort = selectedSort.value;
+  patch.descending = selectedDescending.value;
+  if (thumbnailSize.value) patch.thumbnail = thumbnailSize.value;
+  if (typeof showStars.value === "boolean") patch.show_stars = showStars.value;
+  if (typeof config.likeness_threshold === "number")
+    patch.likeness_threshold = config.likeness_threshold;
+  if (config.openai_host) patch.openai_host = config.openai_host;
+  if (config.openai_port) patch.openai_port = config.openai_port;
+  if (config.openai_model) patch.openai_model = config.openai_model;
+  if (config.default_device) patch.default_device = config.default_device;
+  // Only send image_roots and selected_image_root if present
+  if (Array.isArray(config.image_roots) && config.image_roots.length > 0)
+    patch.image_roots = config.image_roots;
+  if (config.selected_image_root)
+    patch.selected_image_root = config.selected_image_root;
+  console.log("PATCH /config payload:", patch);
+  const response = await fetch(`${BACKEND_URL}/config`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
+  if (response.ok) {
+    const updatedConfig = await response.json();
+    console.log("PATCH /config response:", updatedConfig);
+  } else {
+    console.error("PATCH /config failed with status:", response.status);
+  }
 }
 
 function selectImageRoot(root) {
@@ -248,8 +273,8 @@ function selectImageRoot(root) {
 }
 
 async function saveConfig() {
-  await fetch(`/${BACKEND_URL}/config`, {
-    method: "POST",
+  await fetch(`${BACKEND_URL}/config`, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       image_roots: config.image_roots,
@@ -273,15 +298,6 @@ function handleGridBackgroundClick(e) {
   }
 }
 
-// --- Chat Overlay ---
-function openChatOverlay() {
-  chatOpen.value = true;
-}
-
-function closeChatOverlay() {
-  chatOpen.value = false;
-}
-
 function handleGlobalKeydown(e) {
   const keys = ["Home", "End", "PageUp", "PageDown"];
   if (keys.includes(e.key)) {
@@ -293,7 +309,19 @@ function handleGlobalKeydown(e) {
 }
 
 async function handleImagesAssignedToCharacter({ characterId, imageIds }) {
-  refreshGridVersion();
+  // Forward to ImageGrid via ref
+  if (
+    gridContainer.value &&
+    typeof gridContainer.value.removeImagesById === "function"
+  ) {
+    gridContainer.value.removeImagesById(imageIds);
+  }
+}
+
+function handleImagesUploaded() {
+  // Called when images are imported
+  refreshGridVersion(); // Force grid and thumbnails to refresh
+  refreshSidebar(); // Optionally refresh sidebar counts
 }
 
 // --- Export to Zip ---
@@ -307,6 +335,26 @@ function handleExportZip() {
   gridContainer.value?.exportCurrentViewToZip();
 }
 
+// --- Search Overlay ---
+const searchOverlayVisible = ref(false);
+
+function openSearchOverlay() {
+  searchOverlayVisible.value = true;
+  console.log("Search overlay visibility toggled:", searchOverlayVisible.value);
+}
+
+function closeSearchOverlay() {
+  searchOverlayVisible.value = false;
+  console.log("Search overlay closed");
+}
+
+function handleClearSearch() {
+  console.log("[App.vue] handleClearSearch called");
+  searchQuery.value = "";
+  console.log("[App.vue] searchQuery cleared:", searchQuery.value);
+  refreshGridVersion(); // Force the ImageGrid to refresh
+}
+
 // --- Watchers ---
 // Scroll to bottom after END loads last page
 // (Removed watch on images)
@@ -315,9 +363,6 @@ function handleExportZip() {
 
 watch(searchQuery, (newVal, oldVal) => {
   if (!newVal && oldVal) {
-    if (previousSort.value && previousSort.value !== selectedSort.value) {
-      selectedSort.value = previousSort.value;
-    }
     refreshGridVersion();
   }
 });
@@ -340,48 +385,40 @@ watch(settingsDialog, (val) => {
   if (val) fetchConfig();
 });
 
-watch(selectedSort, (val) => {
-  patchConfigUIOptions({ sort: val });
+watch([selectedSort, selectedDescending], () => {
+  patchConfigUIOptions();
+  refreshGridVersion();
 });
 
-watch(thumbnailSize, (val) => {
-  patchConfigUIOptions({ thumbnail: val });
+watch(thumbnailSize, () => {
+  patchConfigUIOptions();
 });
 
 watch(
   () => config.likeness_threshold,
-  (val) => {
-    patchConfigUIOptions({ likeness_threshold: val });
+  () => {
+    patchConfigUIOptions();
   }
 );
 
-watch(showStars, (val) => {
-  patchConfigUIOptions({ show_stars: val });
+watch(showStars, () => {
+  patchConfigUIOptions();
 });
 
+// Watch all AI chat config fields together and PATCH all at once
 watch(
-  () => config.openai_host,
-  (val) => {
-    patchConfigUIOptions({ openai_host: val });
-  }
-);
-watch(
-  () => config.openai_port,
-  (val) => {
-    patchConfigUIOptions({ openai_port: val });
-  }
-);
-watch(
-  () => config.openai_model,
-  (val) => {
-    patchConfigUIOptions({ openai_model: val });
+  () => [config.openai_host, config.openai_port, config.openai_model],
+  ([host, port, model], [oldHost, oldPort, oldModel]) => {
+    if (host !== oldHost || port !== oldPort || model !== oldModel) {
+      patchConfigUIOptions();
+    }
   }
 );
 // Watch for default_device changes
 watch(
   () => config.default_device,
-  (val) => {
-    patchConfigUIOptions({ default_device: val });
+  () => {
+    patchConfigUIOptions();
   }
 );
 
