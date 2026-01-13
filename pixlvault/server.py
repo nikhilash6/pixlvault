@@ -336,7 +336,7 @@ class Server:
             return JSONResponse(
                 status_code=500,
                 content={"detail": "Internal Server Error"},
-                headers=headers
+                headers=headers,
             )
 
     def _create_picture_imports(self, uploaded_files, dest_folder):
@@ -1870,11 +1870,13 @@ class Server:
             threshold: float = Query(0.5),
         ):
             query_params = {}
+            format = None
             if request.query_params:
                 query_params = dict(request.query_params)
                 query = query_params.pop("query", query)
                 offset = int(query_params.pop("offset", offset))
                 limit = int(query_params.pop("limit", limit))
+                format = request.query_params.getlist("format")
             if not query:
                 raise HTTPException(
                     status_code=400, detail="Query parameter is required for search"
@@ -1894,6 +1896,7 @@ class Server:
                     offset=offset,
                     limit=limit,
                     threshold=threshold,
+                    format=format,
                     select_fields=Picture.metadata_fields(),
                 )
 
@@ -2291,9 +2294,9 @@ class Server:
             success = self.vault.db.run_task(delete_pic, id)
             if not success:
                 raise HTTPException(status_code=404, detail="Picture not found")
-            return {
-                "status": "success",
-            }
+            return JSONResponse(
+                content={"status": "success", "message": f"Picture id={id} deleted."}
+            )
 
         @self.api.get("/pictures")
         async def list_pictures(
