@@ -46,8 +46,8 @@ FLORENCE_REVISION = "5ca5edf5bd017b9919c05d08aebef5e4c7ac3bac"
 CUSTOM_TAGGER_PATH = os.path.join(os.path.dirname(__file__), "..", MODEL_DIR, "best.pt")
 CUSTOM_TAGGER_THRESHOLD_FULL = 0.9
 CUSTOM_TAGGER_THRESHOLD_CROPS = 0.8
-CUSTOM_TAGGER_IMAGE_SIZE_FULL = 512
-CUSTOM_TAGGER_IMAGE_SIZE_CROPS = 256
+CUSTOM_TAGGER_IMAGE_SIZE_FULL = 448
+CUSTOM_TAGGER_IMAGE_SIZE_CROPS = 224
 CUSTOM_TAGGER_BATCH = 16
 CLIP_MODEL_NAME = "ViT-B-32"
 CLIP_MODEL_WEIGHTS = "laion2b_s34b_b79k"
@@ -307,11 +307,22 @@ class PictureTagger:
                 self._init_florence_captioning()
                 self._models_ready = True
 
+    def is_captioning_initialized(self) -> bool:
+        return bool(
+            getattr(self, "_florence_model", None) is not None
+            and getattr(self, "_florence_processor", None) is not None
+        )
+
     def max_concurrent_images(self):
         if self._device == "cpu":
             return MAX_CONCURRENT_IMAGES_CPU
         else:
             return MAX_CONCURRENT_IMAGES_GPU
+
+    def description_batch_size(self):
+        max_concurrent = max(1, int(self.max_concurrent_images()))
+        florence_batch = max(1, int(getattr(self, "_florence_batch_size", 1)))
+        return min(max_concurrent, florence_batch)
 
     def _init_florence_captioning(self):
         """

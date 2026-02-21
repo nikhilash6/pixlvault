@@ -588,13 +588,13 @@ def test_post_logo_altered_pixel_upload():
     log_resources("END test_post_logo_altered_pixel_upload")
 
 
-def test_read_root():
-    log_resources("START test_read_root")
+def test_read_version():
+    log_resources("START test_read_version")
     with tempfile.TemporaryDirectory() as temp_dir:
         server_config_path = os.path.join(temp_dir, "server_config.json")
         with Server(server_config_path=server_config_path) as server:
             client = TestClient(server.api)
-            response = client.get("/")
+            response = client.get("/version")
             assert response.status_code == 200
             expected_version = get_project_version()
             assert response.json() == {
@@ -602,7 +602,7 @@ def test_read_root():
                 "version": expected_version,
             }
     gc.collect()
-    log_resources("END test_read_root")
+    log_resources("END test_read_version")
 
 
 def test_benchmark_add_images_by_binary_upload():
@@ -715,12 +715,54 @@ def test_semantic_search():
                     )
                 )
 
+            tag_futures = [
+                server.vault.get_worker_future(
+                    WorkerType.TAGGER,
+                    Picture,
+                    pic_id,
+                    "tags",
+                )
+                for pic_id in picture_ids
+            ]
+            description_futures = [
+                server.vault.get_worker_future(
+                    WorkerType.DESCRIPTION,
+                    Picture,
+                    pic_id,
+                    "description",
+                )
+                for pic_id in picture_ids
+            ]
+
             server.vault.start_workers(
                 {
                     WorkerType.TAGGER,
                     WorkerType.DESCRIPTION,
+                    WorkerType.SMART_SCORE_SCRAPHEAP,
                 }
             )
+
+            def wait_for_imported_at(timeout_s=60, poll_interval=0.5):
+                start = time.time()
+                pending = set(picture_ids)
+                while pending and (time.time() - start) < timeout_s:
+                    completed = set()
+                    for pid in pending:
+                        meta_resp = client.get(f"/pictures/{pid}/metadata")
+                        if meta_resp.status_code != 200:
+                            continue
+                        meta = meta_resp.json()
+                        if meta.get("imported_at"):
+                            completed.add(pid)
+                    pending -= completed
+                    if pending:
+                        time.sleep(poll_interval)
+                assert not pending, (
+                    "Timed out waiting for imported_at for picture ids: "
+                    f"{sorted(pending)}"
+                )
+
+            wait_for_imported_at()
 
             # Wait for facial features to be processed and associate Esmeralda Vault with largest face in each picture
             for pid in picture_ids:
@@ -800,6 +842,12 @@ def test_semantic_search():
                         logging.debug(
                             f"Associated face ID {face_id} in picture {pid} with character ID {char_id}"
                         )
+
+            for future in description_futures:
+                future.result(timeout=120)
+
+            for future in tag_futures:
+                future.result(timeout=120)
 
             server.vault.start_workers(
                 {

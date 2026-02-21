@@ -39,6 +39,7 @@ from pixlvault.routes.characters import create_router as create_characters_route
 from pixlvault.routes.picture_sets import create_router as create_picture_sets_router
 from pixlvault.routes.tags import create_router as create_tags_router
 from pixlvault.routes.pictures import create_router as create_pictures_router
+from pixlvault.routes.comfyui import create_router as create_comfyui_router
 from pixlvault.picture_utils import PictureUtils
 
 
@@ -159,6 +160,7 @@ class Server:
     def _should_send_ws_update(self, event_type: EventType, filters: dict) -> bool:
         return event_type in (
             EventType.CHANGED_PICTURES,
+            EventType.PICTURE_IMPORTED,
             EventType.CHANGED_TAGS,
             EventType.CLEARED_TAGS,
         )
@@ -172,6 +174,13 @@ class Server:
             picture_ids = data if isinstance(data, (list, tuple, set)) else []
             payload = {
                 "type": "tags_changed",
+                "event": event_type.name,
+                "picture_ids": list(picture_ids),
+            }
+        elif event_type == EventType.PICTURE_IMPORTED:
+            picture_ids = data if isinstance(data, (list, tuple, set)) else []
+            payload = {
+                "type": "picture_imported",
                 "event": event_type.name,
                 "picture_ids": list(picture_ids),
             }
@@ -526,6 +535,11 @@ class Server:
             version = self._get_version()
             return {"message": "PixlVault REST API", "version": version}
 
+        @self.api.get("/version")
+        async def read_version():
+            version = self._get_version()
+            return {"message": "PixlVault REST API", "version": version}
+
         @self.api.get("/favicon.ico")
         def favicon():
             index_path = self._get_frontend_index_path()
@@ -541,6 +555,8 @@ class Server:
         @self.api.websocket("/ws/updates")
         async def websocket_updates(websocket: WebSocket):
             await websocket.accept()
+            if not self._ws_loop:
+                self._ws_loop = asyncio.get_running_loop()
             client = {"ws": websocket, "filters": {}}
             with self._ws_clients_lock:
                 self._ws_clients.append(client)
@@ -572,6 +588,7 @@ class Server:
         self.api.include_router(create_picture_sets_router(self))
         self.api.include_router(create_tags_router(self))
         self.api.include_router(create_pictures_router(self))
+        self.api.include_router(create_comfyui_router(self))
 
         ###############################
         # Config endpoints            #
