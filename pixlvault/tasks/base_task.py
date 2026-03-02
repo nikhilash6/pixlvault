@@ -54,6 +54,18 @@ class BaseTask(ABC):
         finally:
             self.completed_at = datetime.utcnow()
 
+    def on_queued(self) -> None:
+        return None
+
+    def estimated_vram_mb(self) -> int:
+        return 0
+
+    def allow_cpu_spillover(self) -> bool:
+        return False
+
+    def enable_cpu_spillover(self) -> None:
+        return None
+
     @abstractmethod
     def _run_task(self) -> Any:
         raise NotImplementedError

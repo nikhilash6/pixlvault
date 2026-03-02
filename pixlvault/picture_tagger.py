@@ -29,7 +29,36 @@ from pixlvault.utils.image_processing.video_utils import VideoUtils
 
 logger = get_logger(__name__)
 
-DEFAULT_WD14_TAGGER_REPO = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return max(1, value)
+    except ValueError:
+        logger.warning(
+            "Invalid integer for %s=%r, using default=%s", name, raw, default
+        )
+        return default
+
+
+def _env_float(name: str, default: float | None) -> float | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+        if value <= 0:
+            return None
+        return value
+    except ValueError:
+        logger.warning("Invalid float for %s=%r, using default=%s", name, raw, default)
+        return default
+
+
+DEFAULT_WD14_TAGGER_REPO = "SmilingWolf/wd-convnext-tagger-v3"
 FILES = ["keras_metadata.pb", "saved_model.pb", "selected_tags.csv"]
 FILES_ONNX = ["model.onnx"]
 SUB_DIR = "variables"
@@ -37,8 +66,8 @@ SUB_DIR_FILES = ["variables.data-00000-of-00001", "variables.index"]
 CSV_FILE = FILES[-1]
 MODEL_DIR = "downloaded_models"
 BATCH_SIZE = 1
-MAX_CONCURRENT_IMAGES_GPU = 32
-MAX_CONCURRENT_IMAGES_CPU = 8
+MAX_CONCURRENT_IMAGES_GPU = _env_int("PIXLVAULT_TAGGER_MAX_CONCURRENT_GPU", 64)
+MAX_CONCURRENT_IMAGES_CPU = _env_int("PIXLVAULT_TAGGER_MAX_CONCURRENT_CPU", 8)
 FLORENCE_BATCH_SIZE_GPU = 4
 FLORENCE_BATCH_SIZE_CPU = 2
 TAGGER_DATALOADER_TIMEOUT = 30
@@ -49,10 +78,13 @@ FLORENCE_REVISION = "5ca5edf5bd017b9919c05d08aebef5e4c7ac3bac"
 CUSTOM_TAGGER_HF_REPO = "PersonalJeebus/pixlvault-anomaly-tagger"
 CUSTOM_TAGGER_FILENAME = "best.pt"
 CUSTOM_TAGGER_PATH = os.path.join(os.path.dirname(__file__), "..", MODEL_DIR, "best.pt")
-CUSTOM_TAGGER_THRESHOLD_FULL = 0.85
+CUSTOM_TAGGER_THRESHOLD_FULL = 0.6
 CUSTOM_TAGGER_IMAGE_SIZE_FULL = 448
-CUSTOM_TAGGER_BATCH = 16
+CUSTOM_TAGGER_IMAGE_SIZE_QUALITY_CROP = 320
+CUSTOM_TAGGER_BATCH = _env_int("PIXLVAULT_CUSTOM_TAGGER_BATCH", 16)
 CLIP_MODEL_NAME = "ViT-B-32"
+DEFAULT_MAX_VRAM_GB = _env_float("PIXLVAULT_MAX_VRAM_GB", None)
+EXPECTED_CONCURRENT_TAG_TASKS = _env_int("PIXLVAULT_EXPECTED_TAG_TASKS", 2)
 
 # Tags that require close-up face crops to detect reliably at full-image resolution.
 # These are collected from face-crop passes and merged into the picture's flat tag list.
@@ -64,6 +96,7 @@ QUALITY_CROP_TAG_WHITELIST = frozenset(
         "chromatic aberration",
         "scan artifacts",
         "film grain",
+        "malformed teeth",
     }
 )
 CLIP_MODEL_WEIGHTS = "laion2b_s34b_b79k"
@@ -89,7 +122,7 @@ class PictureTagger:
         device=None,
         image_root: str = None,
     ):
-        logger.info("Initializing PictureTagger...")
+        logger.debug("Initializing PictureTagger...")
         self._model_location = model_location
         self._silent = silent
         self._image_root = image_root
@@ -116,19 +149,23 @@ class PictureTagger:
                 self._device = "cpu"
 
         logger.info(f"PictureTagger initialised with device: {self._device}")
-
         self._custom_tagger_path = CUSTOM_TAGGER_PATH
         self._use_custom_tagger = True
         self._custom_tagger_threshold_full = CUSTOM_TAGGER_THRESHOLD_FULL
         self._custom_tagger_image_size_full = CUSTOM_TAGGER_IMAGE_SIZE_FULL
+        self._custom_tagger_image_size_quality_crop = (
+            CUSTOM_TAGGER_IMAGE_SIZE_QUALITY_CROP
+        )
         self._custom_tagger_batch = CUSTOM_TAGGER_BATCH
         self._custom_device = self._device
+        self._max_vram_usage_mb: int | None = None
 
         self._ensure_model_files(force_download=force_download)
 
         # Defer heavy model initialization until first use.
         self.ort_sess = None
         self.input_name = None
+        self._onnx_batch_capacity = 1
         self._rating_tags = None
         self._general_tags = None
 
@@ -169,6 +206,162 @@ class PictureTagger:
             if self._device == "cpu"
             else FLORENCE_BATCH_SIZE_GPU
         )
+        self._expected_concurrent_tag_tasks = EXPECTED_CONCURRENT_TAG_TASKS
+        self.set_max_vram_usage_gb(DEFAULT_MAX_VRAM_GB)
+
+    @staticmethod
+    def _query_total_vram_mb() -> int:
+        try:
+            import subprocess
+
+            output = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            totals = []
+            for line in output.splitlines():
+                value = line.strip()
+                if not value:
+                    continue
+                totals.append(int(float(value)))
+            return sum(totals)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _query_process_vram_mb() -> int:
+        try:
+            import subprocess
+
+            pid = os.getpid()
+            output = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=pid,used_memory",
+                    "--format=csv,noheader,nounits",
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            used_mb = 0
+            for line in output.splitlines():
+                parts = [part.strip() for part in line.split(",")]
+                if len(parts) < 2:
+                    continue
+                try:
+                    line_pid = int(parts[0])
+                    line_used_mb = int(float(parts[1]))
+                except Exception:
+                    continue
+                if line_pid == pid:
+                    used_mb += line_used_mb
+            return used_mb
+        except Exception:
+            return 0
+
+    def _runtime_vram_headroom_mb(self, reserve_mb: int = 128) -> int | None:
+        budget_mb = self._max_vram_usage_mb
+        if self._device != "cuda" or not budget_mb:
+            return None
+        used_mb = self._query_process_vram_mb()
+        if used_mb <= 0:
+            return None
+        return max(0, int(budget_mb - used_mb - max(0, int(reserve_mb))))
+
+    def set_max_vram_usage_gb(self, max_vram_gb: float | None):
+        if max_vram_gb is None:
+            self._max_vram_usage_mb = None
+            return
+        try:
+            requested_mb = int(float(max_vram_gb) * 1024)
+        except Exception:
+            self._max_vram_usage_mb = None
+            return
+        if requested_mb <= 0:
+            self._max_vram_usage_mb = None
+            return
+        total_mb = self._query_total_vram_mb()
+        if total_mb > 0:
+            self._max_vram_usage_mb = max(1, min(requested_mb, total_mb))
+        else:
+            self._max_vram_usage_mb = requested_mb
+        logger.info(
+            "Tagger VRAM budget set to %.2f GB (%s MB)",
+            self._max_vram_usage_mb / 1024.0,
+            self._max_vram_usage_mb,
+        )
+
+    def _vram_limited_batch_cap(self, base_mb: int, per_item_mb: int) -> int:
+        budget_mb = self._max_vram_usage_mb
+        if self._device != "cuda" or not budget_mb:
+            return 10_000
+        expected_tasks = max(1, int(getattr(self, "_expected_concurrent_tag_tasks", 1)))
+        reserve_mb = max(256, int(budget_mb * 0.20))
+        distributable_mb = max(1, budget_mb - reserve_mb)
+        task_budget_mb = max(1, int(distributable_mb / expected_tasks))
+        if task_budget_mb <= base_mb:
+            return 1
+        return max(1, int((task_budget_mb - base_mb) / max(1, per_item_mb)))
+
+    def _effective_wd14_batch_size(self) -> int:
+        max_concurrent = max(1, int(self.max_concurrent_images()))
+        onnx_cap = max(1, int(getattr(self, "_onnx_batch_capacity", 1)))
+        wd14_batch = min(max_concurrent, onnx_cap)
+        if self._device == "cuda":
+            wd14_batch = min(
+                wd14_batch,
+                self._vram_limited_batch_cap(base_mb=900, per_item_mb=220),
+            )
+            runtime_headroom_mb = self._runtime_vram_headroom_mb(reserve_mb=128)
+            if runtime_headroom_mb is not None:
+                runtime_batch_cap = max(1, int(runtime_headroom_mb / 220))
+                wd14_batch = min(wd14_batch, runtime_batch_cap)
+        return max(1, int(wd14_batch))
+
+    def _effective_custom_batch_size(self) -> int:
+        custom_batch = max(1, int(self._custom_tagger_batch))
+        if self._device == "cuda":
+            custom_batch = min(
+                custom_batch,
+                self._vram_limited_batch_cap(base_mb=700, per_item_mb=180),
+            )
+            runtime_headroom_mb = self._runtime_vram_headroom_mb(reserve_mb=128)
+            if runtime_headroom_mb is not None:
+                runtime_batch_cap = max(1, int(runtime_headroom_mb / 180))
+                custom_batch = min(custom_batch, runtime_batch_cap)
+        wd14_batch = self._effective_wd14_batch_size()
+        return max(1, int(min(custom_batch, wd14_batch)))
+
+    def suggested_tag_task_size(self) -> int:
+        wd14_batch = self._effective_wd14_batch_size()
+        custom_batch = self._effective_custom_batch_size()
+        return max(1, min(wd14_batch, custom_batch))
+
+    def estimate_task_vram_mb(self, image_count: int) -> int:
+        image_count = max(1, int(image_count or 1))
+        wd14_batch = min(self._effective_wd14_batch_size(), image_count)
+        custom_batch = min(self._effective_custom_batch_size(), image_count)
+        wd14_estimate = 900 + 220 * wd14_batch
+        custom_estimate = 700 + 180 * custom_batch
+        return int(max(wd14_estimate, custom_estimate, 1200))
+
+    def estimate_task_incremental_vram_mb(self, image_count: int) -> int:
+        wd14_batch = min(
+            self._effective_wd14_batch_size(),
+            max(1, int(image_count or 1)),
+        )
+        custom_batch = min(
+            self._effective_custom_batch_size(),
+            max(1, int(image_count or 1)),
+        )
+        wd14_incremental = 220 * wd14_batch
+        custom_incremental = 180 * custom_batch
+        return int(max(256, wd14_incremental, custom_incremental))
 
     def _resolve_picture_path(self, file_path: str) -> str:
         return ImageUtils.resolve_picture_path(self._image_root, file_path)
@@ -931,6 +1124,24 @@ class PictureTagger:
                     ),
                 )
         self.input_name = self.ort_sess.get_inputs()[0].name
+        self._onnx_batch_capacity = self._resolve_onnx_batch_capacity()
+
+    def _resolve_onnx_batch_capacity(self) -> int:
+        if getattr(self, "ort_sess", None) is None:
+            return 1
+        try:
+            input_meta = self.ort_sess.get_inputs()[0]
+            input_shape = getattr(input_meta, "shape", None)
+            if not input_shape:
+                return 1
+            batch_dim = input_shape[0]
+            if isinstance(batch_dim, int):
+                return max(1, int(batch_dim))
+            if batch_dim is None or isinstance(batch_dim, str):
+                return max(1, int(self.max_concurrent_images()))
+        except Exception as exc:
+            logger.warning("Could not resolve ONNX batch capacity: %s", exc)
+        return 1
 
     def _build_custom_tagger_model(self, arch: str, num_labels: int):
         from torchvision.models import convnext_tiny, convnext_base
@@ -1164,6 +1375,9 @@ class PictureTagger:
     def custom_tagger_image_size_full(self) -> int:
         return int(self._custom_tagger_image_size_full)
 
+    def custom_tagger_image_size_quality_crop(self) -> int:
+        return int(self._custom_tagger_image_size_quality_crop)
+
     @staticmethod
     def _expand_bbox_to_square(bbox, img_width, img_height, target_size):
         """Expand [x1, y1, x2, y2] outward from its center to a square of
@@ -1214,17 +1428,18 @@ class PictureTagger:
             items,
             stop_event=stop_event,
             threshold=self._custom_tagger_threshold_full,
-            image_size=self._custom_tagger_image_size_full,
+            image_size=self._custom_tagger_image_size_quality_crop,
+            pass_name="quality_crops",
         )
-        filtered = {}
-        for key, tags in raw.items():
-            quality_tags = [t for t in tags if t in QUALITY_CROP_TAG_WHITELIST]
-            if quality_tags:
-                filtered[key] = quality_tags
-        return filtered
+        return raw
 
     def _tag_custom_items(
-        self, items, stop_event=None, threshold=None, image_size=None
+        self,
+        items,
+        stop_event=None,
+        threshold=None,
+        image_size=None,
+        pass_name: str = "full_images",
     ):
         if not items:
             return {}
@@ -1241,8 +1456,12 @@ class PictureTagger:
             transform = self._build_custom_transform(image_size)
             self._custom_transform_cache[image_size] = transform
 
-        logger.info("Performing custom tagging on %d items...", len(items))
-        batch_size = max(1, self._custom_tagger_batch)
+        logger.debug(
+            "Performing custom tagging (%s) on %d items...",
+            pass_name,
+            len(items),
+        )
+        batch_size = self._effective_custom_batch_size()
         results = {}
         for batch_start in range(0, len(items), batch_size):
             if stop_event is not None and stop_event.is_set():
@@ -1296,7 +1515,7 @@ class PictureTagger:
 
         return self._naturalize_tags(results)
 
-    def _tag_images_custom(self, image_paths, stop_event=None):
+    def _tag_images_custom(self, image_paths, stop_event=None, preloaded_images=None):
         from PIL import Image
 
         if not hasattr(self, "_custom_transform"):
@@ -1315,7 +1534,7 @@ class PictureTagger:
             path = str(image_path)
             ext = os.path.splitext(path)[1].lower()
             if ext in video_exts:
-                frames = VideoUtils.extract_representative_video_frames(path, count=3)
+                frames = VideoUtils.extract_representative_video_frames(path, count=1)
                 if not frames:
                     logger.error("No frames extracted from video: %s", path)
                     continue
@@ -1323,7 +1542,10 @@ class PictureTagger:
                     items.append((f"{path}#frame{idx}", frame))
                 continue
             try:
-                image = Image.open(path).convert("RGB")
+                if preloaded_images is not None and path in preloaded_images:
+                    image = preloaded_images[path]
+                else:
+                    image = Image.open(path).convert("RGB")
             except Exception as e:
                 logger.error("Could not load image path: %s, error: %s", path, e)
                 continue
@@ -1337,10 +1559,11 @@ class PictureTagger:
             stop_event=stop_event,
             threshold=self._custom_tagger_threshold_full,
             image_size=self._custom_tagger_image_size_full,
+            pass_name="full_images",
         )
         return self._merge_video_frame_tags(results)
 
-    def tag_images(self, image_paths, stop_event=None):
+    def tag_images(self, image_paths, stop_event=None, preloaded_images=None):
         """
         Tag images using WD14 and optionally extend with the custom tagger.
 
@@ -1358,11 +1581,25 @@ class PictureTagger:
 
         self._ensure_tagging_ready()
 
-        dataset = ImageLoadingDatasetPrepper(image_paths)
-        if self._device == "cpu":
-            max_concurrent = MAX_CONCURRENT_IMAGES_CPU
-        else:
-            max_concurrent = MAX_CONCURRENT_IMAGES_GPU
+        preloaded_map = preloaded_images or {}
+        remaining_paths = [p for p in image_paths if str(p) not in preloaded_map]
+        logger.debug(
+            "[TAG_PRELOAD] total=%s preloaded_hits=%s dataloader_misses=%s",
+            len(image_paths),
+            len(image_paths) - len(remaining_paths),
+            len(remaining_paths),
+        )
+
+        max_concurrent = self._effective_wd14_batch_size()
+        onnx_batch_capacity = max(1, int(getattr(self, "_onnx_batch_capacity", 1)))
+        inference_batch_size = min(max_concurrent, onnx_batch_capacity)
+
+        logger.debug(
+            "[TAG_BATCH] inference_batch_size=%s onnx_batch_capacity=%s max_concurrent=%s",
+            inference_batch_size,
+            onnx_batch_capacity,
+            max_concurrent,
+        )
 
         # On macOS, multiprocessing uses 'spawn' which requires pickling.
         # ONNX InferenceSession cannot be pickled, so disable workers on macOS.
@@ -1370,26 +1607,7 @@ class PictureTagger:
             worker_count = 0
         else:
             worker_count = min(
-                max_concurrent, os.cpu_count() // 2 or 1, len(image_paths)
-            )
-
-        logger.info(
-            "Starting tagger dataloader with worker count: "
-            + str(worker_count)
-            + " and dataset size: "
-            + str(len(dataset))
-        )
-
-        def build_dataloader(worker_count_override: int):
-            data_timeout = TAGGER_DATALOADER_TIMEOUT if worker_count_override > 0 else 0
-            return torch.utils.data.DataLoader(
-                dataset,
-                batch_size=BATCH_SIZE,
-                shuffle=False,
-                num_workers=worker_count_override,
-                collate_fn=self._collate_fn_remove_corrupted,
-                drop_last=False,
-                timeout=data_timeout,
+                max_concurrent, os.cpu_count() // 2 or 1, max(1, len(remaining_paths))
             )
 
         def run_tagging(data_loader):
@@ -1414,7 +1632,7 @@ class PictureTagger:
                         continue
                     image, image_path = data
                     b_imgs_local.append((image_path, image))
-                    if len(b_imgs_local) >= BATCH_SIZE:
+                    if len(b_imgs_local) >= inference_batch_size:
                         b_imgs_local = [
                             (str(image_path), image)
                             for image_path, image in b_imgs_local
@@ -1435,21 +1653,79 @@ class PictureTagger:
                         b_imgs_local.clear()
             return tagging_failed_local, b_imgs_local, results_local
 
-        data = build_dataloader(worker_count)
-        logger.info("Got some tags: %s", data)
+        def run_preloaded_wd14(preloaded_map, results_local):
+            if not preloaded_map:
+                return
+            wd14_batch = []
+            for path in image_paths:
+                loaded_img = preloaded_map.get(str(path))
+                if loaded_img is None:
+                    continue
+                try:
+                    prepared = ImageLoadingDatasetPrepper._preprocess_image(loaded_img)
+                except Exception as exc:
+                    logger.error(
+                        "Could not preprocess preloaded image %s: %s", path, exc
+                    )
+                    continue
+                wd14_batch.append((str(path), prepared))
+                if len(wd14_batch) >= inference_batch_size:
+                    batch_result = self._run_batch(wd14_batch, undesired_tags)
+                    if batch_result is not None:
+                        results_local.update(self._naturalize_tags(batch_result))
+                    wd14_batch.clear()
+            if wd14_batch:
+                batch_result = self._run_batch(wd14_batch, undesired_tags)
+                if batch_result is not None:
+                    results_local.update(self._naturalize_tags(batch_result))
+
         b_imgs = []
         all_results = {}
+        run_preloaded_wd14(preloaded_map, all_results)
         try:
-            _tagging_failed, b_imgs, all_results = run_tagging(data)
+            if remaining_paths:
+                logger.debug(
+                    "Starting tagger dataloader with worker count: %s and dataset size: %s",
+                    worker_count,
+                    len(remaining_paths),
+                )
+                dataset = ImageLoadingDatasetPrepper(remaining_paths)
+                data = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=inference_batch_size,
+                    shuffle=False,
+                    num_workers=worker_count,
+                    collate_fn=self._collate_fn_remove_corrupted,
+                    drop_last=False,
+                    timeout=(TAGGER_DATALOADER_TIMEOUT if worker_count > 0 else 0),
+                )
+                _tagging_failed, b_imgs, dataloader_results = run_tagging(data)
+                all_results.update(dataloader_results)
+            else:
+                _tagging_failed = False
         except RuntimeError as exc:
             logger.warning("Tagging dataloader stalled: %s", exc)
-            if worker_count > 0 and (stop_event is None or not stop_event.is_set()):
+            if (
+                worker_count > 0
+                and remaining_paths
+                and (stop_event is None or not stop_event.is_set())
+            ):
                 logger.warning(
                     "Retrying tagger dataloader with num_workers=0 for %s items",
-                    len(dataset),
+                    len(remaining_paths),
                 )
-                data = build_dataloader(0)
-                _tagging_failed, b_imgs, all_results = run_tagging(data)
+                dataset = ImageLoadingDatasetPrepper(remaining_paths)
+                data = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=inference_batch_size,
+                    shuffle=False,
+                    num_workers=0,
+                    collate_fn=self._collate_fn_remove_corrupted,
+                    drop_last=False,
+                    timeout=0,
+                )
+                _tagging_failed, b_imgs, dataloader_results = run_tagging(data)
+                all_results.update(dataloader_results)
             else:
                 _tagging_failed = True
 
@@ -1465,16 +1741,16 @@ class PictureTagger:
                     batch_result[k] = tags
                 all_results.update(batch_result)
 
-        logger.info(f"Completed tagging for {len(all_results)} images.")
+        logger.debug(f"Completed tagging for {len(all_results)} images.")
         wd14_results = self._merge_video_frame_tags(all_results)
-        for result in wd14_results.values():
-            logger.info(f"WD14 Tags: {result}")
         if not self._use_custom_tagger:
             return wd14_results
 
-        custom_results = self._tag_images_custom(image_paths, stop_event=stop_event)
-        for result in custom_results.values():
-            logger.info(f"Custom Tags: {result}")
+        custom_results = self._tag_images_custom(
+            image_paths,
+            stop_event=stop_event,
+            preloaded_images=preloaded_map,
+        )
 
         combined_results = {}
         for path in set(wd14_results) | set(custom_results):
@@ -1600,7 +1876,7 @@ class PictureTagger:
             sbert_model = SentenceTransformer("all-MiniLM-L6-v2", device=self._device)
             self._sbert_model = sbert_model
 
-        logger.info(
+        logger.debug(
             "Generating SBERT embeddings for %s texts on device: %s",
             len(texts),
             sbert_model.device,
@@ -1608,7 +1884,7 @@ class PictureTagger:
         text_embeddings = None
         try:
             text_embeddings = sbert_model.encode(texts, show_progress_bar=False)
-            logger.info("Done generating SBERT embeddings.")
+            logger.debug("Done generating SBERT embeddings.")
         except RuntimeError as e:
             if "CUDA" in str(e):
                 logger.warning(
