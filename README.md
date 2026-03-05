@@ -1,67 +1,146 @@
 # PixlVault
 
-A REST API server for PixlVault
+PixlVault is a local picture library server for organizing, filtering, and reviewing large image collections.
 
-## Development
+It provides:
+- A browser-based interface
+- Fast metadata and tag filtering
+- Smart score sorting
+- Character and set organization
+- Local storage of your library data
 
-- Install dependencies: `pip install -e .`
-- Run server: `python -m pixlvault.server`
+PixlVault runs on your machine and serves the UI at a local web address.
 
-## Tagger Benchmark
+## Install PixlVault
 
-- Benchmark tagging throughput on a folder of media:
-	- `python scripts/benchmark_tagger.py /path/to/images --limit 256 --runs 3`
-- Tune batch/concurrency between runs via env vars:
-	- `PIXLVAULT_TAGGER_MAX_CONCURRENT_GPU=96`
-	- `PIXLVAULT_TAGGER_MAX_CONCURRENT_CPU=8`
-	- `PIXLVAULT_CUSTOM_TAGGER_BATCH=24`
+Choose one installation method.
 
-## Image Plugins
+### Option 1: Windows installer
 
-- Built-in plugins live in `image-plugins/built-in/`.
-- Current built-ins: `colour_filter`, `scaling`, `brightness_contrast`, `blur_sharpen`.
-- User plugins live in `image-plugins/user/`.
-- Start from the template: `image-plugins/user/plugin_template.py`.
-- Copy the template to a new `.py` file in `image-plugins/user/`, then rename class/id and implement `run()`.
-- `plugin_template.py` is intentionally ignored by plugin discovery.
+Use this if you want the easiest setup on Windows.
 
-## Database Migrations (Alembic)
+1. Go to the GitHub Releases page for this repository.
+2. Download the latest Windows installer `.exe`.
+3. Run the installer.
+4. Start PixlVault Server from the Start Menu shortcut.
+5. Open your browser to `http://localhost:9537`.
 
-PixlVault uses Alembic for schema changes. The server runs migrations on startup.
+## Option 2: Install from PyPI
 
-- Set the database URL with `PIXLVAULT_DB_URL` (defaults to `sqlite:///vault.db`).
-- Create a new migration after model changes:
-	- `python -m alembic revision --autogenerate -m "describe change"`
-- Apply migrations manually if needed:
-	- `python -m alembic upgrade head`
+Use this if you already have Python and want a pip install.
 
-## Publishing
+Requirements:
+- Python 3.10 or newer
 
-- Build frontend: `cd frontend && npm ci && npm run build && cd ..`
-- Build Python package: `python -m build`
-- Upload: `twine upload dist/*`
+Install:
 
-### GitHub tagged releases to PyPI
+```bash
+pip install pixlvault
+```
 
-- Workflow file: [.github/workflows/publish-pypi.yml](.github/workflows/publish-pypi.yml)
-- Trigger: push tag matching `v*` (for example `v0.7.0`)
-- Behavior:
-	- builds frontend bundle
-	- verifies tag matches `[project].version` in [pyproject.toml](pyproject.toml)
-	- builds wheel/sdist
-	- publishes to PyPI using Trusted Publishing
+Run:
 
-One-time PyPI setup:
+```bash
+pixlvault-server
+```
 
-- In PyPI, open your project → **Publishing** → **Add a new pending publisher**
-- Set:
-	- **Owner**: your GitHub org/user
-	- **Repository**: `pixlvault`
-	- **Workflow name**: `publish-pypi.yml`
-	- **Environment name**: leave blank (unless you add one in the workflow)
+Then open:
 
-Release command sequence:
+```text
+http://localhost:9537
+```
 
-- Update version in [pyproject.toml](pyproject.toml)
-- Commit and push
-- Create/push tag: `git tag v0.7.0 && git push origin v0.7.0`
+## Option 3: Clone and run manually
+
+Use this if you want to run from source.
+
+Requirements:
+- Python 3.10 or newer
+- Node.js 20 or newer
+- npm
+
+Steps:
+
+```bash
+git clone <your-repo-url>
+cd pixlvault
+
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+# source .venv/bin/activate
+
+pip install --upgrade pip
+pip install -e .
+
+cd frontend
+npm ci
+npm run build
+cd ..
+
+pixlvault-server
+```
+
+Then open:
+
+```text
+http://localhost:9537
+```
+
+## Installing plugins
+
+PixlVault supports built-in plugins and user plugins.
+
+- Built-in plugins are in `image-plugins/built-in/`.
+- User plugins are in `image-plugins/user/`.
+- Start from `image-plugins/user/plugin_template.py`.
+
+To add your own plugin:
+
+1. Copy `image-plugins/user/plugin_template.py` to a new `.py` file in `image-plugins/user/`.
+2. Rename the plugin class and plugin id.
+3. Implement the plugin `run()` method.
+4. Restart PixlVault Server.
+
+`plugin_template.py` is ignored by plugin discovery and will not be loaded as a plugin.
+
+## First run and data location
+
+On first run, PixlVault creates a user config directory and stores:
+- Server config
+- Database
+- Imported media files
+
+If you need to use a custom config path:
+
+```bash
+python -m pixlvault.app --server-config "C:\path\to\server-config.json"
+```
+
+## Updating PixlVault
+
+### PyPI install
+
+```bash
+pip install --upgrade pixlvault
+```
+
+### Source install
+
+Pull latest changes, rebuild frontend, and reinstall:
+
+```bash
+git pull
+cd frontend
+npm ci
+npm run build
+cd ..
+pip install -e .
+```
+
+## Troubleshooting
+
+- If the page does not load, confirm the server process is running.
+- If port `9537` is in use, set a different port in your server config file.
+- If frontend assets are missing, rebuild frontend with `npm run build` and restart the server.
