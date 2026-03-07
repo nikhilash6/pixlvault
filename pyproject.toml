@@ -1,11 +1,39 @@
 [project]
 name = "pixlvault"
 version = "0.8.0"
-description = "PixlVault Picture Database"
+description = "Self-hosted picture library with AI tagging, semantic search, and a clean web UI"
+readme = "README.md"
+license = { file = "LICENSE" }
 authors = [
-    { name = "PixlVault" }
+    { name = "Gaute Lindkvist" }
+]
+keywords = [
+    "image library",
+    "AI tagging",
+    "semantic search",
+    "photo management",
+    "self-hosted",
+    "comfyui",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 requires-python = ">=3.10"
+
+[project.urls]
+Homepage = "https://pixelurgy.github.io/pixlvault"
+Repository = "https://github.com/Pixelurgy/pixlvault"
+"Bug Tracker" = "https://github.com/Pixelurgy/pixlvault/issues"
+Changelog = "https://github.com/Pixelurgy/pixlvault/releases"
 dependencies = [
     "open_clip_torch",
     "fastapi",

@@ -1,3 +1,5 @@
+include README.md
+include LICENSE
 recursive-include pixlvault/frontend/dist *
 include pixlvault/alembic.ini
 recursive-include pixlvault/migrations *
