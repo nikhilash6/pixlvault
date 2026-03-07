@@ -1,7 +1,6 @@
 {
   "meta": {
     "device": "gpu",
-    "project_version": "0.7.2",
     "query_threshold": 0.4,
     "schema_version": 1
   },

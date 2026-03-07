@@ -979,7 +979,6 @@ def test_semantic_search(request):
             regression_payload = {
                 "meta": {
                     "device": device_tag,
-                    "project_version": get_project_version(),
                     "query_threshold": 0.4,
                     "schema_version": 1,
                 },
