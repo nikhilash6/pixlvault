@@ -213,10 +213,8 @@ Example:
 
 PixlVault can run fully on CPU, but GPU acceleration requires **CUDA 12.8** plus the corresponding CUDA-enabled PyTorch and ONNX Runtime packages.
 
-### Linux
-
-1. Install or update your NVIDIA driver (must support CUDA 12.x). [1](https://discuss.pytorch.org/t/torch-cuda-installation-on-cpu-only-machine/169962)[2](https://github.com/pytorch/pytorch/issues/169929)  
-2. Install the CUDA Toolkit for your distribution from NVIDIA’s CUDA downloads page. [1](https://discuss.pytorch.org/t/torch-cuda-installation-on-cpu-only-machine/169962)  
+1. Install or update your NVIDIA driver (must support CUDA 12.x).
+2. Install the CUDA Toolkit for your distribution from NVIDIA’s CUDA downloads page. [1](https://developer.nvidia.com/cuda-toolkit-archive)
 3. Verify installation:  
    ```bash
    nvcc --version
@@ -226,24 +224,9 @@ PixlVault can run fully on CPU, but GPU acceleration requires **CUDA 12.8** plus
    ```bash
    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
    ```  
-   Linux resolves GPU wheels from PyTorch’s accelerator-specific indexes. [3](https://www.sparkcodehub.com/tensorflow/fundamentals/how-to-configure-gpu)
+   
 5. Install ONNX Runtime GPU:  
    ```bash
-   pip uninstall -y onnxruntime
-   pip install onnxruntime-gpu
-   ```
-
-### Windows
-
-1. Install/update NVIDIA driver (required for CUDA runtime). [4](https://docs.astral.sh/uv/guides/integration/pytorch/)  
-2. Install the CUDA Toolkit for Windows using NVIDIA’s official installer. [5](https://www.geeksforgeeks.org/deep-learning/installing-a-cpu-only-version-of-pytorch/)  
-3. Install PyTorch with CUDA 12.8 (Windows cannot auto-select CUDA wheels):  
-   ```powershell
-   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-   ```  
-   PyPI ships CPU-only wheels by default on Windows, so specifying the CUDA wheel index is required. [6](https://docs.nvidia.com/deploy/cuda-compatibility/index.html)
-4. Install ONNX Runtime GPU:  
-   ```powershell
    pip uninstall -y onnxruntime
    pip install onnxruntime-gpu
    ```
