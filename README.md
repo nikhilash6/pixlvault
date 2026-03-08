@@ -77,7 +77,7 @@ Requirements:
 Steps:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Pixelurgy/pixlvault.git
 cd pixlvault
 
 python -m venv .venv
