@@ -12,6 +12,7 @@ It provides:
 - Smart score sorting
 - Character and set organization
 - Local storage of your library data
+- Simple keyboard shortcuts for scoring, selection, deletion and navigation.
 
 PixlVault runs on your machine and serves the UI at a local web address.
 
