@@ -1,6 +1,7 @@
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from setuptools import setup
 from setuptools.command.build_py import build_py as _build_py
@@ -24,10 +25,18 @@ def _build_frontend() -> None:
     node_modules = frontend_dir / "node_modules"
     if not node_modules.is_dir():
         print("setup.py: running npm ci in frontend/", flush=True)
-        subprocess.check_call(["npm", "ci"], cwd=str(frontend_dir))
+        subprocess.check_call(
+            ["npm", "ci"],
+            cwd=str(frontend_dir),
+            shell=sys.platform == "win32",
+        )
 
     print("setup.py: running npm run build in frontend/", flush=True)
-    subprocess.check_call(["npm", "run", "build"], cwd=str(frontend_dir))
+    subprocess.check_call(
+        ["npm", "run", "build"],
+        cwd=str(frontend_dir),
+        shell=sys.platform == "win32",
+    )
 
 
 def _sync_migration_assets() -> None:
