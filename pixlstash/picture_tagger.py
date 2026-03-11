@@ -76,7 +76,6 @@ TAGGER_DATALOADER_TIMEOUT = 30
 GENERAL_THRESHOLD = 0.8
 UNDESIRED_TAGS = "solo, general, male_focus, meme, sensitive"
 CAPTION_SEPARATOR = ", "
-FLORENCE_REVISION = "5ca5edf5bd017b9919c05d08aebef5e4c7ac3bac"
 CUSTOM_TAGGER_HF_REPO = "PersonalJeebus/pixlvault-anomaly-tagger"
 CUSTOM_TAGGER_FILENAME = "best.pt"
 CUSTOM_TAGGER_PATH = os.path.join(MODEL_DIR, "best.pt")
@@ -214,7 +213,7 @@ class PictureTagger:
         self._florence_processor = None
 
         self._florence_device = None
-        self._florence_model_name = "microsoft/Florence-2-base"
+        self._florence_model_name = "florence-community/Florence-2-base"
         self._last_florence_fallback_reason = None
         self._last_florence_fallback_at = None
 
@@ -794,34 +793,28 @@ class PictureTagger:
             logger.error("Try: pip install --upgrade transformers")
 
     def _load_florence_model(self, device, dtype):
-        from transformers import AutoProcessor, AutoModelForCausalLM
+        from transformers import Florence2Processor, Florence2ForConditionalGeneration
 
         if not isinstance(device, torch.device):
             device = torch.device(device)
 
-        self._florence_processor = AutoProcessor.from_pretrained(
+        self._florence_processor = Florence2Processor.from_pretrained(
             self._florence_model_name,
-            revision=FLORENCE_REVISION,
-            trust_remote_code=True,
         )
 
         # Try SDPA first, fall back to eager if not supported
         attn_impl = "sdpa"
         try:
-            self._florence_model = AutoModelForCausalLM.from_pretrained(
+            self._florence_model = Florence2ForConditionalGeneration.from_pretrained(
                 self._florence_model_name,
-                trust_remote_code=True,
-                revision=FLORENCE_REVISION,
                 torch_dtype=dtype,
                 attn_implementation=attn_impl,
             ).to(device)
         except (TypeError, AttributeError) as e:
             logger.debug(f"SDPA not supported, falling back to eager attention: {e}")
             attn_impl = "eager"
-            self._florence_model = AutoModelForCausalLM.from_pretrained(
+            self._florence_model = Florence2ForConditionalGeneration.from_pretrained(
                 self._florence_model_name,
-                trust_remote_code=True,
-                revision=FLORENCE_REVISION,
                 torch_dtype=dtype,
                 attn_implementation=attn_impl,
             ).to(device)
@@ -957,9 +950,10 @@ class PictureTagger:
                     generated_text = self._florence_processor.batch_decode(
                         generated_ids, skip_special_tokens=False
                     )[0]
-                    caption = (
-                        generated_text.replace("<s>", "").replace("</s>", "").strip()
+                    parsed = self._florence_processor.post_process_generation(
+                        generated_text, task="<MORE_DETAILED_CAPTION>"
                     )
+                    caption = parsed.get("<MORE_DETAILED_CAPTION>", "").strip()
                     # Ensure caption ends at last sentence-ending punctuation
                     last_punct = max([caption.rfind(p) for p in [".", "!", "?"]])
                     if last_punct != -1:
@@ -1021,7 +1015,10 @@ class PictureTagger:
                 generated_text = self._florence_processor.batch_decode(
                     generated_ids, skip_special_tokens=False
                 )[0]
-                caption = generated_text.replace("<s>", "").replace("</s>", "").strip()
+                parsed = self._florence_processor.post_process_generation(
+                    generated_text, task="<MORE_DETAILED_CAPTION>"
+                )
+                caption = parsed.get("<MORE_DETAILED_CAPTION>", "").strip()
                 # Ensure caption ends at last sentence-ending punctuation
                 last_punct = max([caption.rfind(p) for p in [".", "!", "?"]])
                 if last_punct != -1:
@@ -1141,7 +1138,10 @@ class PictureTagger:
 
             captions = {}
             for (image_path, _), generated_text in zip(valid_items, generated_texts):
-                caption = generated_text.replace("<s>", "").replace("</s>", "").strip()
+                parsed = self._florence_processor.post_process_generation(
+                    generated_text, task="<MORE_DETAILED_CAPTION>"
+                )
+                caption = parsed.get("<MORE_DETAILED_CAPTION>", "").strip()
                 last_punct = max([caption.rfind(p) for p in [".", "!", "?"]])
                 if last_punct != -1:
                     caption = caption[: last_punct + 1].strip()

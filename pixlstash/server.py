@@ -383,7 +383,7 @@ class Server:
         host = self._server_config.get("host", "127.0.0.1")
         port = self._server_config.get("port", 9537)
         server_url = f"http://{host}:{port}"
-        _w = 51
+        _w = 54
         _b = "═" * _w
         print(
             f"\n"

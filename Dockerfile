@@ -71,7 +71,7 @@ RUN pip install --no-cache-dir \
     httpx \
     python-multipart \
     requests \
-    "transformers<4.49" \
+    transformers \
     insightface \
     rapidfuzz \
     tqdm \
