@@ -416,15 +416,35 @@
             <div class="step" id="docker-cpu">
               <span class="step-label">2b - Permanent Storage</span>
               <div class="method-info">
+                <p class="step-note">
+                  First, create the storage folder so it is owned by your user
+                  (if Docker creates it, it will be owned by root and the
+                  container won't be able to write to it):
+                </p>
+                <div class="cmd-block">
+                  <code>mkdir -p ~/Pictures/pixlstash</code>
+                  <button
+                    class="copy-btn"
+                    data-copy="mkdir -p ~/Pictures/pixlstash"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <p class="step-note" style="margin-top: 12px">
+                  Then start the container:
+                </p>
                 <div class="cmd-block">
                   <code
-                    >docker run -d \ -e PIXLSTASH_HOST=0.0.0.0 \ -p 9537:9537 \
-                    -v ~/Pictures/pixlstash:/home/pixlstash \ --name pixlstash \
-                    ghcr.io/pikselkroken/pixlstash:latest</code
+                    >docker run -d \ --user $(id -u):$(id -g) \ -e
+                    HOME=/home/pixlstash \ -e PIXLSTASH_HOST=0.0.0.0 \ -p
+                    9537:9537 \ -v ~/Pictures/pixlstash:/home/pixlstash \ --name
+                    pixlstash \ ghcr.io/pikselkroken/pixlstash:latest</code
                   >
                   <button
                     class="copy-btn"
                     data-copy="docker run -d \
+  --user $(id -u):$(id -g) \
+  -e HOME=/home/pixlstash \
   -e PIXLSTASH_HOST=0.0.0.0 \
   -p 9537:9537 \
   -v ~/Pictures/pixlstash:/home/pixlstash \
@@ -445,6 +465,11 @@
                   all its data storage. This means that all your pictures, tags,
                   characters, stacks, and settings will be saved to the provided
                   folder and persist even if you stop or remove the container.
+                  <br />
+                  The <code>--user $(id -u):$(id -g)</code> flag runs the
+                  container process as your host user, so it can read and write
+                  the folder you created above without needing any extra
+                  permission changes.
                 </p>
               </div>
             </div>
@@ -500,10 +525,9 @@
                 >
                 <button
                   class="copy-btn"
-                  data-copy="distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+                  data-copy="curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
     | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -sL &quot;https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list&quot; \
+curl -sL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
     | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
     | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
@@ -554,11 +578,27 @@ sudo systemctl restart docker"
 
             <div class="step" id="docker-gpu">
               <span class="step-label">Run the container with GPU support</span>
+              <p class="step-note">
+                Create the storage folder first if you haven't already (so it is
+                owned by your user, not root):
+              </p>
+              <div class="cmd-block">
+                <code>mkdir -p ~/Pictures/pixlstash</code>
+                <button
+                  class="copy-btn"
+                  data-copy="mkdir -p ~/Pictures/pixlstash"
+                >
+                  Copy
+                </button>
+              </div>
+              <p class="step-note" style="margin-top: 12px">
+                Then start the container:
+              </p>
               <div class="cmd-block">
                 <code
-                  >docker run -d \ --runtime nvidia \ -e
-                  NVIDIA_VISIBLE_DEVICES=all \ -e
-                  NVIDIA_DRIVER_CAPABILITIES=compute,utility \ -e
+                  >docker run -d \ --runtime nvidia \ --user $(id -u):$(id -g)
+                  \ -e HOME=/home/pixlstash \ -e NVIDIA_VISIBLE_DEVICES=all \
+                  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \ -e
                   PIXLSTASH_HOST=0.0.0.0 \ -p 9537:9537 \ -v
                   ~/Pictures/pixlstash:/home/pixlstash \ --name pixlstash \
                   ghcr.io/pikselkroken/pixlstash:latest-gpu</code
@@ -567,6 +607,8 @@ sudo systemctl restart docker"
                   class="copy-btn"
                   data-copy="docker run -d \
   --runtime nvidia \
+  --user $(id -u):$(id -g) \
+  -e HOME=/home/pixlstash \
   -e NVIDIA_VISIBLE_DEVICES=all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
   -e PIXLSTASH_HOST=0.0.0.0 \
