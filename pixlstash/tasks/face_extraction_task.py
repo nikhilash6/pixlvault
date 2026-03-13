@@ -166,10 +166,19 @@ class FaceExtractionTask(BaseTask):
             self._insightface_app = FaceExtractionTask._global_insightface_app
             return
 
-        logger.debug("initialising InsightFace with GPU (ctx_id=0) or CPU (ctx_id=-1)")
-        app = FaceAnalysis(providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        use_cuda = not PictureTagger.FORCE_CPU and torch.cuda.is_available()
+        if use_cuda:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        else:
+            providers = ["CPUExecutionProvider"]
+        logger.debug(
+            "Initialising InsightFace with providers=%s (ctx_id=%d)",
+            providers,
+            0 if use_cuda else -1,
+        )
+        app = FaceAnalysis(providers=providers)
         app.prepare(
-            ctx_id=0 if not PictureTagger.FORCE_CPU else -1,
+            ctx_id=0 if use_cuda else -1,
             det_thresh=0.25,
             det_size=(480, 480),
         )
