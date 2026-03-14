@@ -37,7 +37,7 @@ On first run, PixlStash creates a user config directory and stores:
 - Database
 - Imported media files
 
-> **Model downloads:** On first startup, PixlStash automatically downloads the AI models required for tagging, captioning, and quality scoring. This includes several hundred MB of model weights. Downloads happen in the background and are stored in the platform user data directory:
+> **Model downloads:** On first startup, PixlStash automatically downloads the AI models required for tagging, captioning, and quality scoring. This includes several hundred MB of model weights. Downloads are stored in the platform user data directory:
 >
 > | OS | Path |
 > |----|------|
