@@ -191,6 +191,7 @@ Fix your environment:
 pip uninstall -y onnxruntime
 pip install onnxruntime-gpu
 ```
+It some cases you may have to uninstall onnxruntime-gpu and reinstall it.
 
 Verify providers:
 
