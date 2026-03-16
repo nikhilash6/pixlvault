@@ -95,7 +95,6 @@ USER pixlstash
 # ── Copy application source ───────────────────────────────────────────────────
 COPY --chown=pixlstash:pixlstash pyproject.toml setup.py MANIFEST.in alembic.ini ./
 COPY --chown=pixlstash:pixlstash pixlstash/ pixlstash/
-COPY --chown=pixlstash:pixlstash migrations/ migrations/
 
 # Install the pixlstash package itself (no deps — already installed above)
 RUN pip install --no-cache-dir --no-deps -e .
@@ -227,7 +226,6 @@ USER pixlstash
 # ── Copy application source ───────────────────────────────────────────────────
 COPY --chown=pixlstash:pixlstash pyproject.toml setup.py MANIFEST.in alembic.ini ./
 COPY --chown=pixlstash:pixlstash pixlstash/ pixlstash/
-COPY --chown=pixlstash:pixlstash migrations/ migrations/
 
 # Install the pixlstash package itself (no deps — already installed above)
 RUN pip install --no-cache-dir --no-deps -e .
